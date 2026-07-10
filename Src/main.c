@@ -351,6 +351,35 @@ int main(void)
       if (inIdx == CONTROL_ADC)
       { // Only use use implementation below if pedals are in use (ADC input)
 
+#if TRQ_BOOST_ENA
+        // Torque Boost: Scale torque command based on actual motor speed
+        // Full torque at low speeds (acceleration, bumps), reduced at high speeds (prevents overshoot)
+        int16_t mot_speed_abs = (ABS(rtY_Left.n_mot) + ABS(rtY_Right.n_mot)) / 2; // Average motor speed
+        int16_t speed_pct = (mot_speed_abs * 100) / N_MOT_MAX;                    // Speed as percentage of max
+
+        int16_t trq_mult; // Torque multiplier in percent
+        if (speed_pct <= TRQ_BOOST_FULL_SPD)
+        {
+          // Low-speed zone: full torque
+          trq_mult = TRQ_BOOST_LOW_MULT;
+        }
+        else if (speed_pct >= TRQ_BOOST_TAPER_SPD)
+        {
+          // High-speed zone: reduced torque
+          trq_mult = TRQ_BOOST_HIGH_MULT;
+        }
+        else
+        {
+          // Taper zone: linear interpolation between low and high multipliers
+          int16_t taper_range = TRQ_BOOST_TAPER_SPD - TRQ_BOOST_FULL_SPD;
+          int16_t taper_pos = speed_pct - TRQ_BOOST_FULL_SPD;
+          trq_mult = TRQ_BOOST_LOW_MULT - ((TRQ_BOOST_LOW_MULT - TRQ_BOOST_HIGH_MULT) * taper_pos) / taper_range;
+        }
+
+        // Apply torque scaling (preserve sign for reverse driving)
+        speed = (speed * trq_mult) / 100;
+#endif
+
 #ifdef MULTI_MODE_DRIVE
 #if SOFT_LIM_ENA
         // Soft speed limiting: smooth approach to max_speed to prevent overshoot

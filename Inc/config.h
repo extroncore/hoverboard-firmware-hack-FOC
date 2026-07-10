@@ -143,18 +143,27 @@
 
 // Control selections
 #define CTRL_TYP_SEL FOC_CTRL // [-] Control type selection: COM_CTRL, SIN_CTRL, FOC_CTRL (default)
-#define CTRL_MOD_REQ VLT_MODE // [-] Control mode request: OPEN_MODE, VLT_MODE (default), SPD_MODE, TRQ_MODE. Note: SPD_MODE and TRQ_MODE are only available for CTRL_FOC!
+#define CTRL_MOD_REQ TRQ_MODE // [-] Control mode request: OPEN_MODE, VLT_MODE (default), SPD_MODE, TRQ_MODE. Note: SPD_MODE and TRQ_MODE are only available for CTRL_FOC!
 #define DIAG_ENA 1            // [-] Motor Diagnostics enable flag: 0 = Disabled, 1 = Enabled (default)
 
 // Limitation settings
-#define I_MOT_MAX 5   // [A] Maximum single motor current limit (default 15)
-#define I_DC_MAX 7    // [A] Maximum stage2 DC Link current limit for Commutation and Sinusoidal types (This is the final current protection. Above this value, current chopping is applied. To avoid this make sure that I_DC_MAX = I_MOT_MAX + 2A) (default 17)
-#define N_MOT_MAX 130 // [rpm] Maximum motor speed limit ~= 7km/u
+#define I_MOT_MAX 12  // [A] Maximum single motor current limit (default 15)
+#define I_DC_MAX 14   // [A] Maximum stage2 DC Link current limit for Commutation and Sinusoidal types (This is the final current protection. Above this value, current chopping is applied. To avoid this make sure that I_DC_MAX = I_MOT_MAX + 2A) (default 17)
+#define N_MOT_MAX 200 // [rpm] Maximum motor speed limit
 
 // Soft Speed Limiting - Smooth approach to N_MOT_MAX to prevent overshoot and oscillation
 #define SOFT_LIM_ENA 1    // [-] Soft speed limiting enable flag: 0 = Disabled (hard clamp), 1 = Enabled (smooth ease-out)
-#define SOFT_LIM_START 85 // [%] Percentage of N_MOT_MAX where soft limiting begins (e.g., 85 = starts at 85% of max speed). Range: [70, 95]
+#define SOFT_LIM_START 70 // [%] Percentage of N_MOT_MAX where soft limiting begins (e.g., 85 = starts at 85% of max speed). Range: [70, 95]
 #define SOFT_LIM_CURVE 2  // [-] Damping curve exponent: 1 = linear, 2 = quadratic (recommended), 3 = cubic (more aggressive). Range: [1, 3]
+
+// Torque Boost - Speed-dependent torque scaling for better low-speed response
+// At low speeds: full torque for acceleration and handling bumps/hills
+// At high speeds: reduced torque to prevent overshoot and allow smooth cruising
+#define TRQ_BOOST_ENA 1        // [-] Torque boost enable flag: 0 = Disabled, 1 = Enabled
+#define TRQ_BOOST_FULL_SPD 40  // [%] Full torque zone: 100% torque below this speed percentage. Range: [20, 50]
+#define TRQ_BOOST_TAPER_SPD 70 // [%] Taper zone ends: torque reduction complete above this speed. Range: [60, 90]
+#define TRQ_BOOST_LOW_MULT 130 // [%] Torque multiplier in low-speed zone (130 = 1.3x for hill climbing). Range: [80, 150]
+#define TRQ_BOOST_HIGH_MULT 70 // [%] Torque multiplier in high-speed zone (70 = 0.7x = 30% reduction). Range: [50, 100]
 
 // Field Weakening / Phase Advance
 #define FIELD_WEAK_ENA 0   // [-] Field Weakening / Phase Advance enable flag: 0 = Disabled (default), 1 = Enabled
@@ -490,12 +499,13 @@
 
 // ACCEL 0,836V => 2,490V       Translate to ADC values f(x) = (x * 4095) / 3.3
 // ACCEL 1045 => 3112
-#define PRI_INPUT2 1, 1045, 20245, 3112, 0 // Pedal Accel        TYPE, MIN, MID, MAX, DEADBAND. See INPUT FORMAT section
+#define PRI_INPUT2 1, 1045, 2045, 3112, 0 // Pedal Accel        TYPE, MIN, MID, MAX, DEADBAND. See INPUT FORMAT section
 
 // #define AUX_INPUT1 2, -1000, 0, 1000, 0 // Sideboard Steer    TYPE, MIN, MID, MAX, DEADBAND. See INPUT FORMAT section
 // #define AUX_INPUT2 2, -1000, 0, 1000, 0 // Sideboard Speed    TYPE, MIN, MID, MAX, DEADBAND. See INPUT FORMAT section
 
-#define RATE 390 // Default 480
+// #define RATE 390 // Default 480
+#define RATE 400
 
 #define SPEED_COEFFICIENT 16384 // 1.0f
 #define STEER_COEFFICIENT 8192  // 0.5f Only active in Sideboard input
