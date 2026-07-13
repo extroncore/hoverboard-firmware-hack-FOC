@@ -169,7 +169,8 @@ static int16_t    speed;                // local variable for speed. -1000 to 10
 
 static uint32_t    buzzerTimer_prev = 0;
 static uint32_t    inactivity_timeout_counter;
-static MultipleTap MultipleTapBrake;    // define multiple tap functionality for the Brake pedal
+uint8_t reverseDir    = 0;   // 0 = Forward, 1 = Reverse. Latched; only changes near standstill.
+uint8_t reverseSwitch = 0;   // Raw sampled switch state this loop: 1 = reverse requested.
 
 static uint16_t rate = RATE; // Adjustable rate to support multiple drive modes on startup
 
@@ -290,8 +291,13 @@ int main(void) {
 
       #ifdef VARIANT_HOVERCAR
       if (inIdx == CONTROL_ADC) {                                   // Only use use implementation below if pedals are in use (ADC input)
-        if (speedAvgAbs < 60) {                                     // Check if Hovercar is physically close to standstill to enable Double tap detection on Brake pedal for Reverse functionality
-          multipleTapDet(input1[inIdx].cmd, HAL_GetTick(), &MultipleTapBrake); // Brake pedal in this case is "input1" variable
+        reverseSwitch = !HAL_GPIO_ReadPin(BUTTON1_PORT, BUTTON1_PIN); // 1 = reverse requested (active-low)
+
+        // Latch the new direction ONLY at (near) standstill. Above the threshold the switch is
+        // remembered in reverseSwitch but not acted on as a direction — the transition logic
+        // below handles it.
+        if (speedAvgAbs < 60) {
+          reverseDir = reverseSwitch;
         }
 
         if (input1[inIdx].cmd > 30) {                               // If Brake pedal (input1) is pressed, bring to 0 also the Throttle pedal (input2) to avoid "Double pedal" driving
@@ -302,7 +308,7 @@ int main(void) {
       #endif
 
       #ifdef ELECTRIC_BRAKE_ENABLE
-        electricBrake(speedBlend, MultipleTapBrake.b_multipleTap);  // Apply Electric Brake. Only available and makes sense for TORQUE Mode
+        electricBrake(speedBlend, 0); // Always brake against actual motion, never flip on direction flag
       #endif
 
       #ifdef VARIANT_HOVERCAR
@@ -403,10 +409,20 @@ int main(void) {
         #endif
         #endif
 
-        if (!MultipleTapBrake.b_multipleTap) {  // Check driving direction
-          speed = steer + speed;                // Forward driving: in this case steer = Brake, speed = Throttle
+        if (reverseSwitch != reverseDir) {
+          // PENDING REVERSAL while still moving (>= 60 rpm) in the old direction.
+          // Redirect the throttle pedal into a brake that opposes actual motion, faded out
+          // near standstill via speedBlend (same treatment the brake pedal gets). This decelerates
+          // the vehicle instead of accelerating it the wrong way.
+          int16_t throttleBrake = (int16_t)(((int32_t)speed * speedBlend) >> 15);
+          if (speedAvg > 0) {
+            throttleBrake = -throttleBrake;       // oppose forward motion
+          }
+          speed = steer + throttleBrake;          // steer (brake pedal) already opposes motion (see note)
+        } else if (!reverseDir) {
+          speed = steer + speed;                  // Forward driving: in this case steer = Brake, speed = Throttle
         } else {
-          speed = steer - speed;                // Reverse driving: in this case steer = Brake, speed = Throttle
+          speed = steer - speed;                  // Reverse driving: in this case steer = Brake, speed = Throttle
         }
         steer = 0;                              // Do not apply steering to avoid side effects if STEER_COEFFICIENT is NOT 0
       }
@@ -648,7 +664,7 @@ int main(void) {
       beepCount(0, 10, 6);
     } else if (BAT_LVL2_ENABLE && batVoltage < BAT_LVL2) {                                            // 1 beep slow (medium pitch): Low bat 2
       beepCount(0, 10, 30);
-    } else if (BEEPS_BACKWARD && (((cmdR < -50 || cmdL < -50) && speedAvg < 0) || MultipleTapBrake.b_multipleTap)) { // 1 beep fast (high pitch): Backward spinning motors
+    } else if (BEEPS_BACKWARD && (((cmdR < -50 || cmdL < -50) && speedAvg < 0) || reverseDir)) { // 1 beep fast (high pitch): Backward spinning motors
       beepCount(0, 5, 1);
       backwardDrive = 1;
     } else {  // do not beep

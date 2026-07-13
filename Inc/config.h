@@ -108,7 +108,7 @@
 // ######################## END OF TEMPERATURE ###############################
 
 // ############################### STARTUP DELAY ################################
-#define STARTUP_DELAY_MS        500       // startup delay [ms] before power latch is activated. Prevents spurious power-on from brief supply glitches (e.g. UART back-powering).
+#define STARTUP_DELAY_MS 500 // startup delay [ms] before power latch is activated. Prevents spurious power-on from brief supply glitches (e.g. UART back-powering).
 // ########################### END OF STARTUP DELAY ############################
 
 // ############################### ODOMETRY ######################################
@@ -157,7 +157,7 @@
 // Limitation settings
 #define I_MOT_MAX 12  // [A] Maximum single motor current limit (default 15)
 #define I_DC_MAX 14   // [A] Maximum stage2 DC Link current limit for Commutation and Sinusoidal types (This is the final current protection. Above this value, current chopping is applied. To avoid this make sure that I_DC_MAX = I_MOT_MAX + 2A) (default 17)
-#define N_MOT_MAX 200 // [rpm] Maximum motor speed limit
+#define N_MOT_MAX 390 // [rpm] Maximum motor speed limit (~12 km/h on 6.5" wheels: 386 rpm x 0.5187 m/rev)
 
 // Soft Speed Limiting - Smooth approach to N_MOT_MAX to prevent overshoot and oscillation
 #define SOFT_LIM_ENA 1    // [-] Soft speed limiting enable flag: 0 = Disabled (hard clamp), 1 = Enabled (smooth ease-out)
@@ -268,7 +268,7 @@
 // ########################### END OF DEBUG LCD ############################
 
 // ############################### BUZZER ENABLE / DISABLE ###############################
-#define BUZZER_ENABLED              // If enabled the buzzer will buzz, otherwise not.
+#define BUZZER_ENABLED // If enabled the buzzer will buzz, otherwise not.
 // ########################### END OF BUZZER ENABLE / DISABLE ############################
 
 // ################################# VARIANT_ADC SETTINGS ############################
@@ -500,6 +500,7 @@
 #undef CTRL_MOD_REQ
 #define CTRL_MOD_REQ TRQ_MODE // HOVERCAR works best in TORQUE Mode. VOLTAGE mode is preffered when freewheeling is not desired when throttle is released.
 #define CONTROL_ADC 0         // use ADC as input. Number indicates priority for dual-input. Disable CONTROL_SERIAL_USART2, FEEDBACK_SERIAL_USART2, DEBUG_SERIAL_USART2!
+#define SUPPORT_BUTTONS_RIGHT // Use button1 (Blue Right cable) as forward/reverse direction switch (PB10, BUTTON1_PIN)
 // #define SIDEBOARD_SERIAL_USART3 1         // Rx from right sensor board: to use photosensors as buttons. Number indicates priority for dual-input. Comment-out if sideboard is not used!
 // #define FEEDBACK_SERIAL_USART3            // Tx to   right sensor board: for LED battery indication. Comment-out if sideboard is not used!
 
@@ -556,7 +557,11 @@
 
 #endif
 
-// Multiple tap detection: default DOUBLE Tap on Brake pedal (4 pulses)
+// NOTE: multipleTapDet() in Src/util.c is compiled unconditionally (not guarded by
+// #ifdef VARIANT_HOVERCAR) and unconditionally references these macros, so they must
+// stay defined even though VARIANT_HOVERCAR no longer calls multipleTapDet() itself.
+// Kept for other variants / build compatibility; do not remove without also guarding
+// multipleTapDet() in util.c.
 #define MULTIPLE_TAP_NR 2 * 2     // [-] Define tap number: MULTIPLE_TAP_NR = number_of_taps * 2, number_of_taps = 1 (for single taping), 2 (for double tapping), 3 (for triple tapping), etc...
 #define MULTIPLE_TAP_HI 600       // [-] Multiple tap detection High hysteresis threshold
 #define MULTIPLE_TAP_LO 200       // [-] Multiple tap detection Low hysteresis threshold
