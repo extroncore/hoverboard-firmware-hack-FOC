@@ -265,6 +265,18 @@ int main(void) {
     readCommand();                        // Read Command: input1[inIdx].cmd, input2[inIdx].cmd
     calcAvgSpeed();                       // Calculate average measured speed: speedAvg, speedAvgAbs
 
+    #if defined(CONTROL_SERIAL_USART2) || defined(CONTROL_SERIAL_USART3)
+      // ####### SERIAL DEAD-MAN #######
+      // If no valid command arrived within SERIAL_TIMEOUT (~0.8 s), zero the torque request so the
+      // rate limiter smoothly ramps the motors down instead of holding the last command forever.
+      // This is the fail-safe for a crashed/disconnected host (e.g. the ESP32); the host also runs
+      // its own watchdog (defense in depth).
+      if (timeoutFlgSerial) {
+        input1[inIdx].cmd = 0;            // Zero steering
+        input2[inIdx].cmd = 0;            // Zero torque/speed request
+      }
+    #endif
+
     #ifndef VARIANT_TRANSPOTTER
       // ####### MOTOR ENABLING: Only if the initial input is very small (for SAFETY) #######
       if (enable == 0 && !rtY_Left.z_errCode && !rtY_Right.z_errCode && 

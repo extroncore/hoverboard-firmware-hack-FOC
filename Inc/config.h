@@ -344,9 +344,15 @@
     #define FLASH_WRITE_KEY      0x1002  // Flash memory writing key. Change this key to ignore the input calibrations from the flash memory and use the ones in config.h
   #endif
 
-  // #define TANK_STEERING              // use for tank steering, each input controls each wheel 
+  // #define TANK_STEERING              // use for tank steering, each input controls each wheel
   // #define SUPPORT_BUTTONS_LEFT       // use left sensor board cable for button inputs.  Disable DEBUG_SERIAL_USART2!
   // #define SUPPORT_BUTTONS_RIGHT      // use right sensor board cable for button inputs. Disable DEBUG_SERIAL_USART3!
+
+  // ESP32 host control: run FOC in TORQUE mode. The `speed` field of SerialCommand is a torque
+  // (current) request. All dynamic limiting is done by the ESP32; the config.h current/speed
+  // caps act only as hard hardware-safety ceilings. Scoped here so other variants keep VLT_MODE.
+  #undef  CTRL_MOD_REQ
+  #define CTRL_MOD_REQ  TRQ_MODE       // TRQ_MODE = 3; TORQUE is only available for FOC_CTRL
 #endif
 // ######################## END OF VARIANT_USART SETTINGS #########################
 
