@@ -1,0 +1,188 @@
+// ============================================================================
+//  main.cpp - wiring of the ESP32 hovercar controller.
+//
+//  Two concurrent contexts:
+//   * controlTask  - pinned to core 1, fixed CONTROL_PERIOD_MS cadence. Reads
+//                    the pedal, shapes torque, streams the command, parses
+//                    feedback, runs the link watchdog. This is safety-critical
+//                    and must not be blocked by the network.
+//   * loop()       - runs the web server (WiFi stack lives on core 0).
+//
+//  Boots into the most restrictive profile (index 0) at zero torque.
+// ============================================================================
+#include <Arduino.h>
+#include "config.h"
+#include "protocol.h"
+#include "shared_state.h"
+#include "control.h"
+#include "preset_store.h"
+#include "HoverboardLink.h"
+#include "WebInterface.h"
+
+SharedState   g_state;
+WebInterface  g_web;
+HoverboardLink g_link;
+
+static void controlTask(void *) {
+  const TickType_t period = pdMS_TO_TICKS(CONTROL_PERIOD_MS);
+  TickType_t lastWake = xTaskGetTickCount();
+
+  pinMode(DIR_SWITCH_PIN, INPUT_PULLUP);
+
+  float   iError       = 0.0f;         // speed-limiter integral accumulator
+  int16_t torqueOut    = 0;            // ramped, signed torque being commanded
+  int8_t  activeCmdDir = FORWARD_SIGN; // command sign the throttle drives now
+
+  for (;;) {
+    // 1) Drain feedback and evaluate the host-side link watchdog.
+    g_link.poll();
+    bool linkOk = (millis() - g_link.lastRxMs()) < LINK_TIMEOUT_MS;
+    const SerialFeedback &fb = g_link.feedback();
+
+    // 2) Snapshot live tunables (set by the web task).
+    Tunables t = g_state.getTunables();
+
+    // 3) Read inputs. The wheels are mirror-mounted (opposite hall-speed signs for
+    //    the same direction), so normalise each side before combining. Result is in
+    //    the command frame: a POSITIVE command -> POSITIVE motionSpeed (see SPEED_SIGN).
+    int32_t motionSpeed = SPEED_SIGN *
+        ((int32_t)SPEED_L_SIGN * fb.speedL_meas + (int32_t)SPEED_R_SIGN * fb.speedR_meas) / 2;
+    int16_t speedAbs    = (int16_t)abs(motionSpeed);
+    int     motionDir   = (motionSpeed > 0) - (motionSpeed < 0);   // -1 / 0 / +1
+
+    int  throttleRaw   = analogRead(THROTTLE_PIN);
+    int  brakeRaw      = analogRead(BRAKE_PIN);
+    bool switchForward = (digitalRead(DIR_SWITCH_PIN) == HIGH);     // NO/open = forward
+
+    int16_t throttleTq = mapPedal(throttleRaw, THROTTLE_RAW_MIN, THROTTLE_RAW_MAX,
+                                  THROTTLE_DEADBAND_RAW, t.maxTorque);
+    int16_t brakeTq    = mapPedal(brakeRaw, BRAKE_RAW_MIN, BRAKE_RAW_MAX,
+                                  BRAKE_DEADBAND_RAW, BRAKE_TORQUE_MAX);
+
+    int8_t requestedCmdDir = switchForward ? (int8_t)FORWARD_SIGN : (int8_t)(-FORWARD_SIGN);
+    bool   estop = g_state.getEstop();
+
+    // 4) Decide the (signed) torque target.
+    int16_t target  = 0;
+    bool    braking = false;
+    bool    fast    = false;   // brake/decel: respond now, skip the soft ramp
+
+    // Opposing torque that tapers to zero near standstill, so we ease to a stop
+    // instead of being driven past zero into reverse (overshoot).
+    auto brakeToward = [&](int16_t mag) -> int16_t {
+      if (speedAbs < BRAKE_BLEND_SPEED)
+        mag = (int16_t)((int32_t)mag * speedAbs / BRAKE_BLEND_SPEED);
+      return (int16_t)(-motionDir * mag);   // motionDir is 0 at rest -> 0
+    };
+
+    if (!linkOk) {
+      // Link lost: fail safe. Zero target, forget accumulated state.
+      target = 0;
+      iError = 0.0f;
+    } else if (estop) {
+      // Emergency stop (web STOP button): ignore all inputs and brake to a stop,
+      // tapered to zero at standstill, then hold. Cleared by the Engage button.
+      braking = true;
+      fast    = true;
+      iError  = 0.0f;
+      target  = brakeToward(BRAKE_TORQUE_MAX);
+    } else {
+      // Whenever essentially stopped it is safe to adopt the switch direction.
+      if (speedAbs <= NEAR_STOP_THRESH) activeCmdDir = requestedCmdDir;
+
+      if (brakeTq > 0) {
+        // (a) Brake pedal overrules everything: torque opposite motion to stop,
+        //     tapered to zero at standstill (never drive through into reverse).
+        braking = true;
+        fast    = true;
+        iError  = 0.0f;
+        target  = brakeToward(brakeTq);
+      } else if (requestedCmdDir != activeCmdDir && speedAbs > NEAR_STOP_THRESH) {
+        // (b) Reversal requested while moving: slow down gently first. Throttle
+        //     is ignored until we reach near-stop (then branch (a)/(c) resumes).
+        braking = true;
+        fast    = true;
+        iError  = 0.0f;
+        target  = brakeToward(DIR_CHANGE_BRAKE_TORQUE);
+      } else {
+        // (c) Normal throttle drive in the active direction.
+        int16_t base = applySpeedLimiter(throttleTq, speedAbs, throttleRaw, t, iError);
+        base = applyLaunchCap(base, speedAbs, t.launchTorqueCap);
+        if (base < 0) base = 0;
+        if (base > t.maxTorque) base = t.maxTorque;
+        target = (int16_t)(activeCmdDir * base);
+      }
+    }
+
+    // 5) Throttle uses the soft ramp (feel); braking/decel is applied at once so
+    //    no stale reverse torque lingers. The board's own slew still smooths both.
+    if (fast) torqueOut = target;
+    else      torqueOut = applyRamp(torqueOut, target, t.rampMsFullScale, CONTROL_PERIOD_MS);
+
+    // 6) Stream the command (steer unused -> 0).
+    g_link.sendCommand(0, torqueOut);
+
+    // 7) Publish telemetry for the dashboard.
+    Telemetry tm{};
+    tm.batVoltage_cV = fb.batVoltage;
+    tm.boardTemp     = fb.boardTemp;
+    tm.speedL        = fb.speedL_meas;
+    tm.speedR        = fb.speedR_meas;
+    tm.motionSpeed   = (int16_t)motionSpeed;
+    tm.torqueSent    = torqueOut;
+    tm.linkOk        = linkOk;
+    tm.braking       = braking;
+    tm.activeForward = (activeCmdDir == (int8_t)FORWARD_SIGN);
+    tm.reqForward    = switchForward;
+    tm.throttlePct   = (t.maxTorque > 0) ? (int16_t)((long)throttleTq * 100 / t.maxTorque) : 0;
+    tm.brakePct      = (int16_t)((long)brakeTq * 100 / BRAKE_TORQUE_MAX);
+    tm.throttleRaw   = (int16_t)throttleRaw;
+    tm.brakeRaw      = (int16_t)brakeRaw;
+    tm.stopped       = (speedAbs <= NEAR_STOP_THRESH);
+    g_state.setTelemetry(tm);
+
+    vTaskDelayUntil(&lastWake, period);
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(50);
+  Serial.println("\n[hovercar] booting");
+
+  g_state.begin();
+  g_presets.begin();                         // loads presets from NVS + applies last selected
+
+  g_link.begin(Serial2, HB_SERIAL_BAUD, HB_RX_PIN, HB_TX_PIN);
+  analogReadResolution(12);
+
+  g_web.begin();
+  Serial.printf("[hovercar] SoftAP '%s' up, open http://192.168.4.1\n", AP_SSID);
+
+  // Control task on core 1, higher priority than loop()/web. Its per-tick work
+  // is tiny, so it preempts only briefly and leaves core 1 free for the server.
+  xTaskCreatePinnedToCore(controlTask, "control", 4096, nullptr, 3, nullptr, 1);
+}
+
+void loop() {
+  g_web.handle();
+
+#if DEBUG_LOG
+  static uint32_t lastLog = 0;
+  if (millis() - lastLog >= DEBUG_LOG_PERIOD_MS) {
+    lastLog = millis();
+    Telemetry tm = g_state.getTelemetry();
+    Serial.printf(
+      "[hovercar] link=%-4s rx=%lu err=%lu | batt=%.2fV temp=%.1fC spd L/R=%d/%d mspd=%d | "
+      "thrADC=%d(%d%%) brkADC=%d(%d%%) dir=%s(req %s) brake=%s tq=%d\n",
+      tm.linkOk ? "OK" : "LOST",
+      (unsigned long)g_link.rxFrames(), (unsigned long)g_link.rxErrors(),
+      tm.batVoltage_cV / 100.0, tm.boardTemp / 10.0, tm.speedL, tm.speedR, tm.motionSpeed,
+      tm.throttleRaw, tm.throttlePct, tm.brakeRaw, tm.brakePct,
+      tm.activeForward ? "FWD" : "REV", tm.reqForward ? "FWD" : "REV",
+      tm.braking ? "ON" : "off", tm.torqueSent);
+  }
+#endif
+
+  delay(2);
+}
