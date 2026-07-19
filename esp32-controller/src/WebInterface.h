@@ -22,9 +22,8 @@ private:
 
   void handleRoot();
   void handleGetState();
-  void handleSelect();             // choose active preset
-  void handleSetLimits();          // apply edited limits live (no persist)
-  void handleSavePreset();         // persist current live tunables into a user slot
+  void handleSelect();             // choose the active (running) preset
+  void handleSavePreset();         // persist edits into a user slot (+ apply live if it's active)
   void handleEstop();              // emergency-stop engage/disengage
   bool authorized();               // true if request carries the valid token
 };

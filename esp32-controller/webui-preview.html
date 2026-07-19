@@ -1,15 +1,31 @@
-#include "WebInterface.h"
-#include "config.h"
-#include "control.h"
-#include "shared_state.h"
-#include "preset_store.h"
-#include <WiFi.h>
+<!DOCTYPE html>
+<!--
+  ============================================================================
+  LOCAL PREVIEW of the ESP32 web interface (esp32-controller/src/WebInterface.cpp).
 
-// ----------------------------------------------------------------------------
-//  Dashboard page. Static (no server-side templating of user data -> no XSS).
-//  Values are fetched as JSON and rendered client-side.
-// ----------------------------------------------------------------------------
-static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
+  This file is NOT flashed to the ESP32. It contains the markup / CSS / client JS
+  intended for INDEX_HTML, plus a small mock layer at the bottom that fakes the
+  /api/* endpoints (simulated telemetry, preset switching, e-stop, Apply/Save) so
+  you can open it in any browser and judge the look & feel before uploading.
+
+  NEW layout being trialled here:
+    * TOP  "Active profile" selector = switches the RUNNING profile immediately
+           (this is the effective profile the car drives with), next to the
+           live readings.
+    * BELOW "Edit / save preset" has its OWN preset selector that only LOADS a
+           preset into the form for editing — it does NOT change what the car is
+           running. "Save preset" persists it to flash; if the saved preset is the
+           ACTIVE one, it is also applied to the car immediately (and a renamed
+           preset updates the lists right away).
+
+  Firmware side (IMPLEMENTED in WebInterface.cpp — keep this preview in sync):
+    - /api/state returns each preset's full tunables (so the editor can load a
+      non-active preset without a round-trip).
+    - /api/savePreset takes an `index` (the edit target); when index == active
+      slot it also publishes the values live.
+    - /api/limits (the old "Apply live") was removed.
+  ============================================================================
+-->
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hovercar mini</title>
@@ -52,6 +68,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
     <div id="stopStatus" class="estop-status" style="display:none">⏳ Braking to a stop…</div>
     <button id="engageBtn" class="engage" onclick="doEngage()" style="display:none">▶ Engage</button>
   </div>
+
   <fieldset class="active-sel"><legend>Active profile</legend>
     <select id="activeSel" onchange="selectActive()"></select>
     <div class="hint">Switches the running profile <b>immediately</b>.</div>
@@ -135,6 +152,92 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
   </fieldset>
   <div id="msg"></div>
 </div>
+
+<!-- ============================ PREVIEW MOCK ============================ -->
+<!-- Fakes the ESP32 /api/* endpoints. Not present in the firmware build.  -->
+<script>
+(function(){
+  const child = {maxTorque:400,speedCeiling:320,launchTorqueCap:300,brakeTorqueMax:300,pGain:2.0,iGain:0.1,rampMsFullScale:700,reverseMaxTorque:250,reverseSpeedCeiling:150,reverseRampMs:900,limitingEnabled:true};
+  const race  = {maxTorque:1000,speedCeiling:900,launchTorqueCap:1000,brakeTorqueMax:900,pGain:1.5,iGain:0.05,rampMsFullScale:200,reverseMaxTorque:600,reverseSpeedCeiling:400,reverseRampMs:400,limitingEnabled:false};
+  const clone = o => JSON.parse(JSON.stringify(o));
+  let stored = [
+    Object.assign({name:'Kid',      editable:false}, clone(child)),
+    Object.assign({name:'Race',     editable:false}, clone(race)),
+    Object.assign({name:'Preset 3', editable:true},  clone(child)),
+    Object.assign({name:'Preset 4', editable:true},  clone(child)),
+    Object.assign({name:'Preset 5', editable:true},  clone(child)),
+  ];
+  let activeIdx = 0;
+  let live = clone(stored[0]);   // the running tunables the car drives with
+  let estop = false;
+  let simSpeed = 0;              // simulated wheel speed (rpm)
+
+  const ci = (v,lo,hi) => { v = parseInt(v,10);   if (isNaN(v)) return lo; return Math.max(lo, Math.min(hi, v)); };
+  const cf = (v,lo,hi) => { v = parseFloat(v);    if (isNaN(v)) return lo; return Math.max(lo, Math.min(hi, v)); };
+
+  // Mirrors applyLimitArgs() server-side clamping in WebInterface.cpp.
+  function applyLimits(t, a){
+    if (a.has('maxTorque'))           t.maxTorque           = ci(a.get('maxTorque'),0,1000);
+    if (a.has('speedCeiling'))        t.speedCeiling        = ci(a.get('speedCeiling'),0,1000);
+    if (a.has('launchTorqueCap'))     t.launchTorqueCap     = ci(a.get('launchTorqueCap'),0,1000);
+    if (a.has('brakeTorqueMax'))      t.brakeTorqueMax      = ci(a.get('brakeTorqueMax'),0,1000);
+    if (a.has('pGain'))               t.pGain               = cf(a.get('pGain'),0,20);
+    if (a.has('iGain'))               t.iGain               = cf(a.get('iGain'),0,5);
+    if (a.has('rampMsFullScale'))     t.rampMsFullScale     = ci(a.get('rampMsFullScale'),150,3000);
+    if (a.has('reverseMaxTorque'))    t.reverseMaxTorque    = ci(a.get('reverseMaxTorque'),0,1000);
+    if (a.has('reverseSpeedCeiling')) t.reverseSpeedCeiling = ci(a.get('reverseSpeedCeiling'),0,1000);
+    if (a.has('reverseRampMs'))       t.reverseRampMs       = ci(a.get('reverseRampMs'),150,3000);
+    if (a.has('limitingEnabled'))     t.limitingEnabled     = (a.get('limitingEnabled') !== '0');
+  }
+  // Mirrors applyNameArg() sanitisation (alnum / space / - / _, max 15).
+  function applyName(t, a){
+    if (!a.has('name')) return;
+    let out = '';
+    for (const c of a.get('name')) { if (/[A-Za-z0-9 _-]/.test(c)) out += c; if (out.length >= 15) break; }
+    if (out.length) t.name = out;
+  }
+
+  function buildState(){
+    const now = Date.now()/1000;
+    // Gentle fake telemetry so the dashboard looks alive.
+    const thr = estop ? 0 : Math.max(0, Math.round(55 + 45*Math.sin(now/3)));
+    const target = estop ? 0 : (thr/100) * live.speedCeiling;
+    simSpeed += (target - simSpeed) * (estop ? 0.15 : 0.05);
+    const spd = Math.round(simSpeed);
+    const braking = estop || (simSpeed > target + 20);
+    return {
+      activeName: live.name, selected: activeIdx,
+      presets: stored.map((p,i) => Object.assign({ i }, p)),   // full tunables per preset
+      linkOk: true,
+      batVoltage_cV: Math.round((36.8 + 0.4*Math.sin(now/20)) * 100),
+      boardTemp: Math.round((31 + 3*Math.sin(now/30)) * 10),
+      speedL: spd, speedR: -spd,
+      torqueSent: estop ? 0 : Math.round((thr/100) * live.maxTorque),
+      braking, activeForward: true, reqForward: true,
+      throttlePct: thr, brakePct: estop ? 100 : 0,
+      estop, stopped: spd <= 30,
+    };
+  }
+
+  const resp = (ok, obj, txt) =>
+    Promise.resolve({ ok, json: () => Promise.resolve(obj), text: () => Promise.resolve(txt) });
+
+  // Route the real client's fetch() calls to the in-page mock.
+  window.fetch = function(url, opts){
+    opts = opts || {};
+    const a = new URLSearchParams(opts.body || '');
+    if (url === '/api/state')       return resp(true, buildState(), '');
+    if (url === '/api/select')    { activeIdx = ci(a.get('index'),0,4); live = clone(stored[activeIdx]); return resp(true, null, 'active profile switched'); }
+    if (url === '/api/savePreset'){ const i = ci(a.get('index'),0,4); if (!stored[i].editable) return resp(false, null, 'preset is read-only');
+                                    const tmp = clone(stored[i]); applyLimits(tmp, a); applyName(tmp, a); stored[i] = tmp; if (i === activeIdx) live = clone(tmp);
+                                    return resp(true, null, 'preset saved (preview)'); }
+    if (url === '/api/estop')     { estop = (a.get('stop') !== '0'); return resp(true, null, estop ? 'emergency stop engaged' : 'engaged - input enabled'); }
+    return resp(false, null, 'not found');
+  };
+})();
+</script>
+
+<!-- ==================== CLIENT JS (intended for INDEX_HTML) ==================== -->
 <script>
 const $ = id => document.getElementById(id);
 const FIELDS = ['maxTorque','speedCeiling','launchTorqueCap','brakeTorqueMax','pGain','iGain',
@@ -235,186 +338,8 @@ function savePreset(){ post('/api/savePreset', Object.assign({index:editIdx, nam
     if (e.key === 'Enter'){ e.preventDefault(); const n = els[i+1]; n ? n.focus() : el.blur(); }
   }));
 })();
-// Self-scheduling poll: wait for each response before the next, so requests can
-// never pile up on the single-client server if WiFi briefly stalls.
+// Self-scheduling poll.
 const REFRESH_MS = 200;
 (async function poll(){ await refresh(); setTimeout(poll, REFRESH_MS); })();
 </script>
-</body></html>)HTML";
-
-// ---------------------------- helpers ---------------------------------------
-static int16_t clampI(long v, long lo, long hi) {
-  if (v < lo) v = lo; if (v > hi) v = hi; return (int16_t)v;
-}
-static float clampF(float v, float lo, float hi) {
-  if (v < lo) v = lo; if (v > hi) v = hi; return v;
-}
-
-void WebInterface::begin() {
-  WiFi.mode(WIFI_AP);
-  // Empty (or too-short) password -> open network. >=8 chars enables WPA2.
-  const char *pw = (strlen(AP_PASSWORD) >= 8) ? AP_PASSWORD : nullptr;
-  WiFi.softAP(AP_SSID, pw, AP_CHANNEL, false /*hidden*/, AP_MAX_CLIENTS);
-  _apIP = WiFi.softAPIP();
-
-  // Captive portal: resolve every hostname to us so the phone's connectivity
-  // probe hits our server and the OS auto-opens the page.
-  _dns.start(53, "*", _apIP);
-
-  _server.on("/", HTTP_GET, [this]() { handleRoot(); });
-  _server.on("/api/state", HTTP_GET, [this]() { handleGetState(); });
-  _server.on("/api/select", HTTP_POST, [this]() { handleSelect(); });
-  _server.on("/api/savePreset", HTTP_POST, [this]() { handleSavePreset(); });
-  _server.on("/api/estop", HTTP_POST, [this]() { handleEstop(); });
-  // Any other path (incl. the OS captive-detection probes such as
-  // /hotspot-detect.html, /generate_204, /ncsi.txt) -> redirect to our page,
-  // which triggers the captive-portal sheet to open it.
-  _server.onNotFound([this]() {
-    _server.sendHeader("Location", String("http://") + _apIP.toString() + "/", true);
-    _server.send(302, "text/plain", "");
-  });
-  _server.begin();
-}
-
-void WebInterface::handle() {
-  _dns.processNextRequest();
-  _server.handleClient();
-}
-
-bool WebInterface::authorized() {
-  // Open control if no token is configured (convenient for bring-up).
-  if (API_TOKEN[0] == '\0') return true;
-  // Otherwise length-checked, constant-ish-time compare of the shared token.
-  String tok = _server.arg("token");
-  const size_t expLen = strlen(API_TOKEN);
-  if (tok.length() != expLen) return false;
-  // constant-ish time compare (avoid early-out on first mismatch)
-  uint8_t diff = 0;
-  for (size_t i = 0; i < expLen; i++) diff |= (uint8_t)(tok[i] ^ API_TOKEN[i]);
-  return diff == 0;
-}
-
-void WebInterface::handleRoot() {
-  _server.send_P(200, "text/html", INDEX_HTML);
-}
-
-// Format one preset (name + full tunables) as a JSON object. Names are
-// sanitised on save, so they're safe to embed. Returns snprintf's count.
-static int fmtPreset(char *out, size_t n, int i, const Tunables &t, bool editable) {
-  return snprintf(out, n,
-    "{\"i\":%d,\"name\":\"%s\",\"editable\":%s,"
-    "\"maxTorque\":%d,\"speedCeiling\":%d,\"launchTorqueCap\":%d,\"brakeTorqueMax\":%d,"
-    "\"pGain\":%.3f,\"iGain\":%.3f,\"rampMsFullScale\":%u,"
-    "\"reverseMaxTorque\":%d,\"reverseSpeedCeiling\":%d,\"reverseRampMs\":%u,"
-    "\"limitingEnabled\":%s}",
-    i, t.profileName, editable ? "true" : "false",
-    t.maxTorque, t.speedCeiling, t.launchTorqueCap, t.brakeTorqueMax,
-    t.pGain, t.iGain, t.rampMsFullScale,
-    t.reverseMaxTorque, t.reverseSpeedCeiling, t.reverseRampMs,
-    t.limitingEnabled ? "true" : "false");
-}
-
-void WebInterface::handleGetState() {
-  Tunables  t  = g_state.getTunables();   // live / active profile
-  Telemetry tm = g_state.getTelemetry();
-
-  // All presets with their full tunables, so the editor can load any of them
-  // (not just the active one) without an extra round-trip. static: this handler
-  // only runs in the single-threaded loop() context, and it keeps these ~1.5 KB
-  // of scratch off the stack.
-  static char plist[1400]; int pn = 0;
-  pn += snprintf(plist + pn, sizeof(plist) - pn, "[");
-  for (int i = 0; i < PresetStore::COUNT; i++) {
-    if (i) pn += snprintf(plist + pn, sizeof(plist) - pn, ",");
-    pn += fmtPreset(plist + pn, sizeof(plist) - pn, i, g_presets.preset(i), g_presets.editable(i));
-  }
-  snprintf(plist + pn, sizeof(plist) - pn, "]");
-
-  static char buf[1700];
-  snprintf(buf, sizeof(buf),
-    "{\"activeName\":\"%s\",\"selected\":%d,\"presets\":%s,"
-    "\"linkOk\":%s,\"batVoltage_cV\":%d,\"boardTemp\":%d,"
-    "\"speedL\":%d,\"speedR\":%d,\"torqueSent\":%d,\"braking\":%s,"
-    "\"activeForward\":%s,\"reqForward\":%s,\"throttlePct\":%d,\"brakePct\":%d,"
-    "\"estop\":%s,\"stopped\":%s}",
-    t.profileName, g_presets.selected(), plist,
-    tm.linkOk ? "true" : "false", tm.batVoltage_cV, tm.boardTemp,
-    tm.speedL, tm.speedR, tm.torqueSent, tm.braking ? "true" : "false",
-    tm.activeForward ? "true" : "false", tm.reqForward ? "true" : "false",
-    tm.throttlePct, tm.brakePct,
-    g_state.getEstop() ? "true" : "false", tm.stopped ? "true" : "false");
-  _server.send(200, "application/json", buf);
-}
-
-// Overwrite the provided, clamped limit fields of `t` from the request args.
-static void applyLimitArgs(WebServer &s, Tunables &t) {
-  if (s.hasArg("maxTorque"))
-    t.maxTorque = clampI(s.arg("maxTorque").toInt(), 0, TORQUE_ABS_MAX);
-  if (s.hasArg("launchTorqueCap"))
-    t.launchTorqueCap = clampI(s.arg("launchTorqueCap").toInt(), 0, TORQUE_ABS_MAX);
-  if (s.hasArg("speedCeiling"))
-    t.speedCeiling = clampI(s.arg("speedCeiling").toInt(), 0, SPEED_CEILING_MAX);
-  if (s.hasArg("brakeTorqueMax"))
-    t.brakeTorqueMax = clampI(s.arg("brakeTorqueMax").toInt(), 0, BRAKE_TORQUE_MAX);
-  if (s.hasArg("pGain"))
-    t.pGain = clampF(s.arg("pGain").toFloat(), 0.0f, PGAIN_MAX);
-  if (s.hasArg("iGain"))
-    t.iGain = clampF(s.arg("iGain").toFloat(), 0.0f, IGAIN_MAX);
-  if (s.hasArg("rampMsFullScale"))
-    t.rampMsFullScale = (uint16_t)clampI(s.arg("rampMsFullScale").toInt(), RAMP_MS_MIN, RAMP_MS_MAX);
-  if (s.hasArg("reverseMaxTorque"))
-    t.reverseMaxTorque = clampI(s.arg("reverseMaxTorque").toInt(), 0, TORQUE_ABS_MAX);
-  if (s.hasArg("reverseSpeedCeiling"))
-    t.reverseSpeedCeiling = clampI(s.arg("reverseSpeedCeiling").toInt(), 0, SPEED_CEILING_MAX);
-  if (s.hasArg("reverseRampMs"))
-    t.reverseRampMs = (uint16_t)clampI(s.arg("reverseRampMs").toInt(), RAMP_MS_MIN, RAMP_MS_MAX);
-  if (s.hasArg("limitingEnabled"))
-    t.limitingEnabled = (s.arg("limitingEnabled").toInt() != 0);
-}
-
-// Copy a user-supplied name into t.profileName, keeping only safe characters
-// (avoids JSON/HTML injection when the name is echoed back). Max 15 chars.
-static void applyNameArg(WebServer &s, Tunables &t) {
-  if (!s.hasArg("name")) return;
-  String in = s.arg("name");
-  char out[sizeof(t.profileName)]; size_t o = 0;
-  for (size_t i = 0; i < in.length() && o < sizeof(out) - 1; i++) {
-    char c = in[i];
-    if (isalnum((int)c) || c == ' ' || c == '-' || c == '_') out[o++] = c;
-  }
-  out[o] = '\0';
-  if (o > 0) { strncpy(t.profileName, out, sizeof(t.profileName) - 1);
-               t.profileName[sizeof(t.profileName) - 1] = '\0'; }
-}
-
-void WebInterface::handleSelect() {
-  if (!authorized()) { _server.send(401, "text/plain", "bad token"); return; }
-  int idx = _server.arg("index").toInt();
-  if (idx < 0 || idx >= PresetStore::COUNT) { _server.send(400, "text/plain", "bad index"); return; }
-  g_presets.select(idx);
-  _server.send(200, "text/plain", "preset selected");
-}
-
-void WebInterface::handleSavePreset() {
-  if (!authorized()) { _server.send(401, "text/plain", "bad token"); return; }
-  // The edit target is an explicit slot index (the editor can point at a preset
-  // other than the active one).
-  int idx = _server.arg("index").toInt();
-  if (idx < 0 || idx >= PresetStore::COUNT) { _server.send(400, "text/plain", "bad index"); return; }
-  if (!g_presets.editable(idx)) { _server.send(400, "text/plain", "preset is read-only"); return; }
-  // Start from the stored preset, overlay the edited fields + name, persist.
-  Tunables t = g_presets.preset(idx);
-  applyLimitArgs(_server, t);
-  applyNameArg(_server, t);
-  g_presets.saveUserPreset(idx, t);
-  // If we just saved the profile the car is running, apply it live too.
-  if (idx == g_presets.selected()) g_state.setTunables(t);
-  _server.send(200, "text/plain", "preset saved");
-}
-
-void WebInterface::handleEstop() {
-  if (!authorized()) { _server.send(401, "text/plain", "bad token"); return; }
-  bool stop = (_server.arg("stop").toInt() != 0);
-  g_state.setEstop(stop);
-  _server.send(200, "text/plain", stop ? "emergency stop engaged" : "engaged - input enabled");
-}
+</body></html>

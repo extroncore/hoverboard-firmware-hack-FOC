@@ -242,19 +242,28 @@ mutex-guarded `SharedState`; presets are touched only from the web/loop task.
 
 - **SoftAP** `hovercar`, **currently open** (`AP_PASSWORD ""`) for easy access; ≥8 chars enables
   WPA2. Default page `http://192.168.4.1`.
-- **Dashboard (polled every 200 ms, self-scheduling):** preset name, link status, direction
+- **Active-profile selector (top):** a dropdown right above the readings switches the **running**
+  profile immediately (`/api/select`). The **"Driving now"** readout mirrors it.
+- **Dashboard (polled every 200 ms, self-scheduling):** active profile name, link status, direction
   (active + requested, e.g. `FWD→REV` mid-switch), braking indicator, battery V, board temp,
   `speed L/R`, torque out, throttle %, brake %.
 - **Emergency STOP** (big red button at the top): latches an e-stop — the controller ignores all
   inputs and brakes to standstill (tapered). The page shows **"Braking to a stop…"** until
   standstill, then an **Engage** button re-enables input.
-- **Presets:** dropdown to select (built-ins marked 🔒). An **Edit / save** panel below shows the
-  selected preset's name + limits; for user slots (3–5) you can edit and **Apply (live)** or
-  **Save preset** (persist to flash). Built-in slots are read-only. The edit form loads only when
-  the selected preset changes, so in-progress edits aren't clobbered by the poll. Fields are in a
-  `<form>` with Enter/Next moving to the next field (mobile keyboard navigation).
-- **Endpoints:** `GET /api/state`; `POST /api/select`, `/api/limits` (live), `/api/savePreset`,
-  `/api/estop`.
+- **Editor (decoupled from the active profile):** the **Edit / save** panel has its **own** "Preset
+  to edit" dropdown that only **loads** a preset's values into the form — it does **not** change what
+  the car is running. There is a single **Save preset** action (no separate "Apply"): it persists to
+  the chosen user slot, and **if that slot is the active profile it is also published live** (so
+  editing the running profile applies on save; a rename shows in the lists immediately). Built-in
+  slots (Kid/Race 🔒) load read-only. The form populates once (from the active profile) and then
+  only when you pick a different edit target, so the 200 ms poll never clobbers in-progress edits.
+  Fields carry plain-language labels + a one-line description each (e.g. *Max power*, *Top speed*,
+  *Brake strength*, *Throttle smoothing*, *Limiter strength (P)* / *follow-through (I)* with example
+  values and decimal ranges), and are in a `<form>` with Enter/Next moving to the next field.
+- **Endpoints:** `GET /api/state` (now returns **every preset's full tunables** so the editor can
+  load a non-active preset without a round-trip); `POST /api/select`, `/api/savePreset` (takes an
+  `index` = edit target; applies live when `index` == active slot), `/api/estop`. (The old
+  `/api/limits` "apply live" endpoint was removed.)
 - **Captive portal:** wildcard DNS + redirect of the OS connectivity probes auto-opens the page on
   connect (see §6.2 for the trade-off).
 
