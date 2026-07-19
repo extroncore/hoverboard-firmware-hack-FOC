@@ -57,7 +57,7 @@ static void controlTask(void *) {
     int16_t throttleTq = mapPedal(throttleRaw, THROTTLE_RAW_MIN, THROTTLE_RAW_MAX,
                                   THROTTLE_DEADBAND_RAW, t.maxTorque);
     int16_t brakeTq    = mapPedal(brakeRaw, BRAKE_RAW_MIN, BRAKE_RAW_MAX,
-                                  BRAKE_DEADBAND_RAW, BRAKE_TORQUE_MAX);
+                                  BRAKE_DEADBAND_RAW, t.brakeTorqueMax);
 
     int8_t requestedCmdDir = switchForward ? (int8_t)FORWARD_SIGN : (int8_t)(-FORWARD_SIGN);
     bool   estop = g_state.getEstop();
@@ -67,9 +67,20 @@ static void controlTask(void *) {
     bool    braking = false;
     bool    fast    = false;   // brake/decel: respond now, skip the soft ramp
 
+    // Standstill latch (hysteresis): once braking has brought the car below
+    // NEAR_STOP_THRESH, release the brake and keep it released until the wheels
+    // genuinely move again (>= BRAKE_BLEND_SPEED). Near zero the hall speed jitters
+    // in sign, so without this the opposing "-motionDir * mag" torque flips every
+    // tick and rocks the car back and forth. Mirrors the STM32 reverse-beep latch.
+    static bool brakeHeldAtStop = false;
+    if      (speedAbs <= NEAR_STOP_THRESH)  brakeHeldAtStop = true;
+    else if (speedAbs >= BRAKE_BLEND_SPEED) brakeHeldAtStop = false;
+
     // Opposing torque that tapers to zero near standstill, so we ease to a stop
-    // instead of being driven past zero into reverse (overshoot).
+    // instead of being driven past zero into reverse (overshoot). Once at
+    // standstill it releases entirely (brakeHeldAtStop) so it can't rock the car.
     auto brakeToward = [&](int16_t mag) -> int16_t {
+      if (brakeHeldAtStop) return 0;
       if (speedAbs < BRAKE_BLEND_SPEED)
         mag = (int16_t)((int32_t)mag * speedAbs / BRAKE_BLEND_SPEED);
       return (int16_t)(-motionDir * mag);   // motionDir is 0 at rest -> 0
@@ -105,19 +116,32 @@ static void controlTask(void *) {
         iError  = 0.0f;
         target  = brakeToward(DIR_CHANGE_BRAKE_TORQUE);
       } else {
-        // (c) Normal throttle drive in the active direction.
-        int16_t base = applySpeedLimiter(throttleTq, speedAbs, throttleRaw, t, iError);
+        // (c) Normal throttle drive in the active direction. Forward and reverse
+        //     have independent caps/ceilings: reverse is usually weaker & slower.
+        bool    rev      = (activeCmdDir != (int8_t)FORWARD_SIGN);
+        int16_t driveCap = rev ? t.reverseMaxTorque    : t.maxTorque;
+        // Remap the pedal against the direction's own cap so full travel = full
+        // (reverse) torque, then limit against that direction's ceiling.
+        int16_t driveTq  = mapPedal(throttleRaw, THROTTLE_RAW_MIN, THROTTLE_RAW_MAX,
+                                    THROTTLE_DEADBAND_RAW, driveCap);
+        Tunables eff = t;
+        if (rev) eff.speedCeiling = t.reverseSpeedCeiling;
+        int16_t base = applySpeedLimiter(driveTq, speedAbs, throttleRaw, eff, iError);
         base = applyLaunchCap(base, speedAbs, t.launchTorqueCap);
         if (base < 0) base = 0;
-        if (base > t.maxTorque) base = t.maxTorque;
+        if (base > driveCap) base = driveCap;
         target = (int16_t)(activeCmdDir * base);
       }
     }
 
     // 5) Throttle uses the soft ramp (feel); braking/decel is applied at once so
     //    no stale reverse torque lingers. The board's own slew still smooths both.
+    //    Forward and reverse each have their own ramp; braking (fast) skips it.
+    bool driveRev = (activeCmdDir != (int8_t)FORWARD_SIGN);
     if (fast) torqueOut = target;
-    else      torqueOut = applyRamp(torqueOut, target, t.rampMsFullScale, CONTROL_PERIOD_MS);
+    else      torqueOut = applyRamp(torqueOut, target,
+                                    driveRev ? t.reverseRampMs : t.rampMsFullScale,
+                                    CONTROL_PERIOD_MS);
 
     // 6) Stream the command (steer unused -> 0).
     g_link.sendCommand(0, torqueOut);
@@ -135,7 +159,7 @@ static void controlTask(void *) {
     tm.activeForward = (activeCmdDir == (int8_t)FORWARD_SIGN);
     tm.reqForward    = switchForward;
     tm.throttlePct   = (t.maxTorque > 0) ? (int16_t)((long)throttleTq * 100 / t.maxTorque) : 0;
-    tm.brakePct      = (int16_t)((long)brakeTq * 100 / BRAKE_TORQUE_MAX);
+    tm.brakePct      = (t.brakeTorqueMax > 0) ? (int16_t)((long)brakeTq * 100 / t.brakeTorqueMax) : 0;
     tm.throttleRaw   = (int16_t)throttleRaw;
     tm.brakeRaw      = (int16_t)brakeRaw;
     tm.stopped       = (speedAbs <= NEAR_STOP_THRESH);

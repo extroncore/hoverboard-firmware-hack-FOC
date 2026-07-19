@@ -183,6 +183,11 @@
 // Default settings will be applied at the end of this config file if not set before
 #define INACTIVITY_TIMEOUT        8       // Minutes of not driving until poweroff. it is not very precise.
 #define BEEPS_BACKWARD            1       // 0 or 1
+// Reverse warning beep is latched with hysteresis on measured speed, so it beeps
+// continuously while actually rolling backwards (speedAvg < 0) instead of flickering
+// near standstill. ON: start below -REVERSE_BEEP_ON_RPM; OFF: stop above -REVERSE_BEEP_OFF_RPM.
+#define REVERSE_BEEP_ON_RPM       30      // [rpm] start reverse beep once moving back this fast (~0.93 km/h @6.5")
+#define REVERSE_BEEP_OFF_RPM      8       // [rpm] stop near standstill (~0.25 km/h; must be < ON for hysteresis)
 #define ADC_MARGIN                100     // ADC input margin applied on the raw ADC min and max to make sure the MIN and MAX values are reached even in the presence of noise
 #define ADC_PROTECT_TIMEOUT       100     // ADC Protection: number of wrong / missing input commands before safety state is taken
 #define ADC_PROTECT_THRESH        200     // ADC Protection threshold below/above the MIN/MAX ADC values

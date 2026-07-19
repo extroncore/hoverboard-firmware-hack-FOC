@@ -2,7 +2,8 @@
 #include "control.h"   // PROFILES (0=child, 1=race)
 
 // Bump when the Tunables layout changes so stale NVS blobs are discarded.
-static const uint32_t NVS_VER = 1;
+// v2: added brakeTorqueMax + reverse{MaxTorque,SpeedCeiling,RampMs}.
+static const uint32_t NVS_VER = 2;
 static const char    *NVS_NS  = "hovercar";
 
 PresetStore g_presets;

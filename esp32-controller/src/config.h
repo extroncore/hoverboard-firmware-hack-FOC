@@ -32,14 +32,18 @@
 // GPIO34/35 are input-only). Calibrate MIN/MAX to each sensor.
 #define THROTTLE_PIN 34
 #define THROTTLE_RAW_MIN 900  // raw analogRead released
-#define THROTTLE_RAW_MAX 3040 // raw analogRead fully pressed
+#define THROTTLE_RAW_MAX 2090 // raw analogRead fully pressed
 #define THROTTLE_DEADBAND_RAW 60
 
 #define BRAKE_PIN 35
 #define BRAKE_RAW_MIN 900
-#define BRAKE_RAW_MAX 3050
+#define BRAKE_RAW_MAX 2090
 #define BRAKE_DEADBAND_RAW 60
-#define BRAKE_TORQUE_MAX 1000 // brake authority (torque applied opposite motion)
+// Absolute brake ceiling. Per-profile brakeTorqueMax (Tunables) is the live knob;
+// this only bounds it (and is the authority used for the emergency stop, which
+// intentionally brakes at full strength). Lower per-profile values give a gentler
+// brake that won't overpower traction and spin the wheels backwards.
+#define BRAKE_TORQUE_MAX 1000 // max brake authority (torque applied opposite motion)
 
 // -------------------------- Direction switch --------------------------------
 // A switch on a digital pin, read with INPUT_PULLUP. Normally-Open (NO) = the
@@ -82,7 +86,7 @@
 // The ESP32 hosts its own network; the phone connects directly (default URL
 // http://192.168.4.1). AP_PASSWORD "" = OPEN network (no password) for easy
 // access. To secure it, set a password of >= 8 characters (enables WPA2).
-#define AP_SSID "hovercar"
+#define AP_SSID "Hovercar mini"
 #define AP_PASSWORD "" // "" = open AP; >=8 chars enables WPA2
 #define AP_CHANNEL 1
 #define AP_MAX_CLIENTS 4
@@ -112,6 +116,11 @@
 //
 // Fields: name, maxTorque, launchTorqueCap, speedCeiling, pGain, iGain,
 //         iErrorMax, iErrorMin, hillPedalThresh(raw), rampMsFullScale,
-//         limitingEnabled
-#define PROFILE_CHILD {"child", 400, 300, 200, 2.0f, 0.1f, 1000.0f, -700.0f, 3000, 700, true}
-#define PROFILE_RACE {"race", 1000, 1000, 900, 1.5f, 0.05f, 800.0f, -400.0f, 3500, 200, false}
+//         limitingEnabled, brakeTorqueMax, reverseMaxTorque,
+//         reverseSpeedCeiling, reverseRampMs
+//
+// brakeTorqueMax is kept <= maxTorque so the car never brakes harder than it can
+// drive (prevents the wheels being spun backwards past traction). Reverse is
+// deliberately weaker/slower/gentler than forward for a kids' car.
+#define PROFILE_CHILD {"child", 400, 300, 320, 2.0f, 0.1f, 1000.0f, -700.0f, 3000, 700, true, 300, 250, 150, 900}
+#define PROFILE_RACE {"race", 1000, 1000, 900, 1.5f, 0.05f, 800.0f, -400.0f, 3500, 200, false, 900, 600, 400, 400}

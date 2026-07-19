@@ -16,8 +16,12 @@ struct Tunables {
   float    iErrorMax;         // anti-windup upper clamp (overspeed bleed)
   float    iErrorMin;         // anti-windup lower clamp (enables hill boost)
   int16_t  hillPedalThresh;   // raw pedal above which we allow the hill boost
-  uint16_t rampMsFullScale;   // ESP32 software ramp: ms for a 0..1000 sweep
+  uint16_t rampMsFullScale;   // ESP32 software ramp: ms for a 0..1000 sweep (forward)
   bool     limitingEnabled;   // master switch for the PI speed limiter
+  int16_t  brakeTorqueMax;    // brake pedal authority (torque applied opposite motion)
+  int16_t  reverseMaxTorque;  // drive torque cap while reversing (usually < maxTorque)
+  int16_t  reverseSpeedCeiling; // rpm ceiling for the limiter while reversing
+  uint16_t reverseRampMs;     // ESP32 software ramp: ms for a 0..1000 sweep (reverse)
 };
 
 // Read-only snapshot for the dashboard.

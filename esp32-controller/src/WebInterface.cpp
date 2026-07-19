@@ -12,7 +12,7 @@
 static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hovercar</title>
+<title>Hovercar mini</title>
 <style>
   :root { color-scheme: dark; }
   body { font-family: system-ui, sans-serif; margin: 0; background:#111; color:#eee; }
@@ -43,7 +43,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
     border-radius:8px; background:#3d1212; color:#ff8080; font-size:19px; font-weight:700; }
 </style></head>
 <body>
-<header>🏎️ Hovercar controller</header>
+<header>🏎️ Hovercar mini controller</header>
 <div class="wrap">
   <div class="estop-bar">
     <button id="stopBtn" class="estop" onclick="doStop()">■ EMERGENCY STOP</button>
@@ -75,9 +75,13 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
     <label>Max torque (0-1000)</label><input id="maxTorque" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next">
     <label>Speed ceiling (rpm)</label><input id="speedCeiling" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next">
     <label>Launch torque cap</label><input id="launchTorqueCap" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next">
+    <label>Brake power (0-1000)</label><input id="brakeTorqueMax" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next">
     <label>P gain</label><input id="pGain" type="number" inputmode="decimal" step="0.01" min="0" max="20" enterkeyhint="next">
     <label>I gain</label><input id="iGain" type="number" inputmode="decimal" step="0.01" min="0" max="5" enterkeyhint="next">
-    <label>Ramp full-scale (ms)</label><input id="rampMsFullScale" type="number" inputmode="numeric" min="150" max="3000" enterkeyhint="done">
+    <label>Ramp full-scale (ms, forward)</label><input id="rampMsFullScale" type="number" inputmode="numeric" min="150" max="3000" enterkeyhint="next">
+    <label>Reverse max torque (0-1000)</label><input id="reverseMaxTorque" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next">
+    <label>Reverse speed ceiling (rpm)</label><input id="reverseSpeedCeiling" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next">
+    <label>Reverse ramp (ms)</label><input id="reverseRampMs" type="number" inputmode="numeric" min="150" max="3000" enterkeyhint="done">
     <label>Speed limiter</label>
     <select id="limitingEnabled"><option value="1">On</option><option value="0">Off</option></select>
     <div class="row" style="margin-top:12px">
@@ -106,10 +110,11 @@ async function refresh(){
     $('brake').innerHTML = s.braking ? '<span class="pill bad">ON</span>' : '<span class="pill ok">off</span>';
     $('throttle').textContent = s.throttlePct + ' %';
     $('brakepct').textContent = s.brakePct + ' %';
-    // Emergency-stop UI: STOP (running) -> "Braking…" -> Engage (once stopped).
-    if (!s.estop)        { show('stopBtn'); hide('stopStatus'); hide('engageBtn'); }
-    else if (!s.stopped) { hide('stopBtn'); show('stopStatus'); hide('engageBtn'); }
-    else                 { hide('stopBtn'); hide('stopStatus'); show('engageBtn'); }
+    // Emergency-stop UI: STOP when running; once engaged show Engage so it can be
+    // cancelled at any time (even while still braking), plus a "Braking…" banner
+    // until the car has actually stopped.
+    if (!s.estop) { hide('engageBtn'); hide('stopStatus'); show('stopBtn'); }
+    else          { hide('stopBtn'); show('engageBtn'); s.stopped ? hide('stopStatus') : show('stopStatus'); }
     // Preset dropdown: rebuild options only when the name list changes.
     const sig = s.presets.map(p=>p.i+':'+p.name).join('|');
     if (sig !== presetSig){
@@ -125,14 +130,18 @@ async function refresh(){
       $('maxTorque').value = s.maxTorque;
       $('speedCeiling').value = s.speedCeiling;
       $('launchTorqueCap').value = s.launchTorqueCap;
+      $('brakeTorqueMax').value = s.brakeTorqueMax;
       $('pGain').value = s.pGain;
       $('iGain').value = s.iGain;
       $('rampMsFullScale').value = s.rampMsFullScale;
+      $('reverseMaxTorque').value = s.reverseMaxTorque;
+      $('reverseSpeedCeiling').value = s.reverseSpeedCeiling;
+      $('reverseRampMs').value = s.reverseRampMs;
       $('limitingEnabled').value = s.limitingEnabled ? '1':'0';
     }
     // Enable editing only for user presets (built-ins are read-only).
     const ed = s.editable;
-    for (const k of ['presetName','maxTorque','speedCeiling','launchTorqueCap','pGain','iGain','rampMsFullScale','limitingEnabled','applyBtn','saveBtn']){
+    for (const k of ['presetName','maxTorque','speedCeiling','launchTorqueCap','brakeTorqueMax','pGain','iGain','rampMsFullScale','reverseMaxTorque','reverseSpeedCeiling','reverseRampMs','limitingEnabled','applyBtn','saveBtn']){
       $(k).disabled = !ed;
     }
     $('editNote').textContent = ed
@@ -158,9 +167,10 @@ function doEngage(){ post('/api/estop', {stop:0}); }
 function selectPreset(){ post('/api/select', {index:$('presetSel').value}); }
 function limitFields(){
   return { maxTorque:$('maxTorque').value, speedCeiling:$('speedCeiling').value,
-    launchTorqueCap:$('launchTorqueCap').value, pGain:$('pGain').value,
-    iGain:$('iGain').value, rampMsFullScale:$('rampMsFullScale').value,
-    limitingEnabled:$('limitingEnabled').value };
+    launchTorqueCap:$('launchTorqueCap').value, brakeTorqueMax:$('brakeTorqueMax').value,
+    pGain:$('pGain').value, iGain:$('iGain').value, rampMsFullScale:$('rampMsFullScale').value,
+    reverseMaxTorque:$('reverseMaxTorque').value, reverseSpeedCeiling:$('reverseSpeedCeiling').value,
+    reverseRampMs:$('reverseRampMs').value, limitingEnabled:$('limitingEnabled').value };
 }
 function applyLimits(){ post('/api/limits', limitFields()); }
 function savePreset(){ post('/api/savePreset', Object.assign({name:$('presetName').value}, limitFields())); }
@@ -250,14 +260,15 @@ void WebInterface::handleGetState() {
   }
   snprintf(plist + pn, sizeof(plist) - pn, "]");
 
-  char buf[1100];
+  char buf[1200];
   snprintf(buf, sizeof(buf),
     "{\"profileName\":\"%s\",\"selected\":%d,\"editable\":%s,\"presets\":%s,"
     "\"linkOk\":%s,\"batVoltage_cV\":%d,\"boardTemp\":%d,"
     "\"speedL\":%d,\"speedR\":%d,\"torqueSent\":%d,\"braking\":%s,"
     "\"activeForward\":%s,\"reqForward\":%s,\"throttlePct\":%d,\"brakePct\":%d,"
-    "\"maxTorque\":%d,\"speedCeiling\":%d,\"launchTorqueCap\":%d,\"pGain\":%.3f,"
-    "\"iGain\":%.3f,\"rampMsFullScale\":%u,\"limitingEnabled\":%s,"
+    "\"maxTorque\":%d,\"speedCeiling\":%d,\"launchTorqueCap\":%d,\"brakeTorqueMax\":%d,"
+    "\"pGain\":%.3f,\"iGain\":%.3f,\"rampMsFullScale\":%u,\"reverseMaxTorque\":%d,"
+    "\"reverseSpeedCeiling\":%d,\"reverseRampMs\":%u,\"limitingEnabled\":%s,"
     "\"estop\":%s,\"stopped\":%s}",
     t.profileName, g_presets.selected(),
     g_presets.editable(g_presets.selected()) ? "true" : "false", plist,
@@ -265,7 +276,8 @@ void WebInterface::handleGetState() {
     tm.speedL, tm.speedR, tm.torqueSent, tm.braking ? "true" : "false",
     tm.activeForward ? "true" : "false", tm.reqForward ? "true" : "false",
     tm.throttlePct, tm.brakePct, t.maxTorque, t.speedCeiling, t.launchTorqueCap,
-    t.pGain, t.iGain, t.rampMsFullScale, t.limitingEnabled ? "true" : "false",
+    t.brakeTorqueMax, t.pGain, t.iGain, t.rampMsFullScale, t.reverseMaxTorque,
+    t.reverseSpeedCeiling, t.reverseRampMs, t.limitingEnabled ? "true" : "false",
     g_state.getEstop() ? "true" : "false", tm.stopped ? "true" : "false");
   _server.send(200, "application/json", buf);
 }
@@ -278,12 +290,20 @@ static void applyLimitArgs(WebServer &s, Tunables &t) {
     t.launchTorqueCap = clampI(s.arg("launchTorqueCap").toInt(), 0, TORQUE_ABS_MAX);
   if (s.hasArg("speedCeiling"))
     t.speedCeiling = clampI(s.arg("speedCeiling").toInt(), 0, SPEED_CEILING_MAX);
+  if (s.hasArg("brakeTorqueMax"))
+    t.brakeTorqueMax = clampI(s.arg("brakeTorqueMax").toInt(), 0, BRAKE_TORQUE_MAX);
   if (s.hasArg("pGain"))
     t.pGain = clampF(s.arg("pGain").toFloat(), 0.0f, PGAIN_MAX);
   if (s.hasArg("iGain"))
     t.iGain = clampF(s.arg("iGain").toFloat(), 0.0f, IGAIN_MAX);
   if (s.hasArg("rampMsFullScale"))
     t.rampMsFullScale = (uint16_t)clampI(s.arg("rampMsFullScale").toInt(), RAMP_MS_MIN, RAMP_MS_MAX);
+  if (s.hasArg("reverseMaxTorque"))
+    t.reverseMaxTorque = clampI(s.arg("reverseMaxTorque").toInt(), 0, TORQUE_ABS_MAX);
+  if (s.hasArg("reverseSpeedCeiling"))
+    t.reverseSpeedCeiling = clampI(s.arg("reverseSpeedCeiling").toInt(), 0, SPEED_CEILING_MAX);
+  if (s.hasArg("reverseRampMs"))
+    t.reverseRampMs = (uint16_t)clampI(s.arg("reverseRampMs").toInt(), RAMP_MS_MIN, RAMP_MS_MAX);
   if (s.hasArg("limitingEnabled"))
     t.limitingEnabled = (s.arg("limitingEnabled").toInt() != 0);
 }
