@@ -24,6 +24,29 @@ struct Tunables {
   uint16_t reverseRampMs;     // ESP32 software ramp: ms for a 0..1000 sweep (reverse)
 };
 
+// Global vehicle calibration: pedal-sensor mapping + motion thresholds. Unlike
+// Tunables these are a property of the physical car, not the driving style, so
+// there is ONE shared set (not per-profile). Persisted in NVS; the config.h
+// #defines are the defaults used when flash is empty. Read live by the control
+// task (mutex-guarded, like Tunables) so the web UI can adjust them on the fly.
+struct Calibration {
+  // Pedal sensor mapping (raw 12-bit ADC counts).
+  int16_t throttleRawMin;      // raw analogRead released
+  int16_t throttleRawMax;      // raw analogRead fully pressed
+  int16_t throttleDeadband;    // low-end raw counts ignored
+  int16_t brakeRawMin;
+  int16_t brakeRawMax;
+  int16_t brakeDeadband;
+  // Motion / direction behaviour (abs wheel rpm, and one torque).
+  int16_t launchSpeedThresh;   // below = launching (launch cap) & safe to change dir
+  int16_t nearStopThresh;      // <= = "stopped": adopt the switch direction
+  int16_t brakeBlendSpeed;     // brake/decel torque tapers to zero below this rpm
+  int16_t dirChangeBrakeTorque;// auto pre-reversal slow-down torque
+  // Drive-wheel diameter (mm). Only used to convert rpm <-> km/h in the web UI;
+  // the control loop stays entirely in rpm.
+  int16_t wheelDiaMm;
+};
+
 // Read-only snapshot for the dashboard.
 struct Telemetry {
   int16_t batVoltage_cV;      // hundredths of a volt
@@ -60,6 +83,19 @@ public:
     xSemaphoreGive(_mutex);
   }
 
+  Calibration getCalibration() {
+    Calibration c;
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    c = _calibration;
+    xSemaphoreGive(_mutex);
+    return c;
+  }
+  void setCalibration(const Calibration &c) {
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    _calibration = c;
+    xSemaphoreGive(_mutex);
+  }
+
   Telemetry getTelemetry() {
     Telemetry t;
     xSemaphoreTake(_mutex, portMAX_DELAY);
@@ -87,11 +123,44 @@ public:
     xSemaphoreGive(_mutex);
   }
 
+  // Config mode: while set, the control task commands zero drive torque (the web
+  // Config page is open). Pedals/switch are still read and telemetry still flows,
+  // so calibration works, but nothing can make the cart drive.
+  bool getConfigMode() {
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    bool c = _configMode;
+    xSemaphoreGive(_mutex);
+    return c;
+  }
+  void setConfigMode(bool c) {
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    _configMode = c;
+    xSemaphoreGive(_mutex);
+  }
+
+  // Whether the car has a valid saved calibration. Defaults to false so the
+  // control task refuses to drive until PresetStore publishes the real state at
+  // boot — an uncalibrated car never drives, even with no client connected.
+  bool getCalibrated() {
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    bool c = _calibrated;
+    xSemaphoreGive(_mutex);
+    return c;
+  }
+  void setCalibrated(bool c) {
+    xSemaphoreTake(_mutex, portMAX_DELAY);
+    _calibrated = c;
+    xSemaphoreGive(_mutex);
+  }
+
 private:
   SemaphoreHandle_t _mutex = nullptr;
-  Tunables  _tunables{};
-  Telemetry _telemetry{};
-  bool      _estop = false;
+  Tunables    _tunables{};
+  Calibration _calibration{};
+  Telemetry   _telemetry{};
+  bool        _estop = false;
+  bool        _configMode = false;
+  bool        _calibrated = false;
 };
 
 extern SharedState g_state;

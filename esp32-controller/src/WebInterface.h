@@ -24,6 +24,8 @@ private:
   void handleGetState();
   void handleSelect();             // choose the active (running) preset
   void handleSavePreset();         // persist edits into a user slot (+ apply live if it's active)
+  void handleSaveCalibration();    // persist global pedal/motion calibration (+ apply live)
+  void handleConfigMode();         // enter/leave config mode (disables drive output)
   void handleEstop();              // emergency-stop engage/disengage
   bool authorized();               // true if request carries the valid token
 };

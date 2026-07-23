@@ -1,345 +1,1176 @@
-<!DOCTYPE html>
+<!doctype html>
 <!--
   ============================================================================
   LOCAL PREVIEW of the ESP32 web interface (esp32-controller/src/WebInterface.cpp).
 
-  This file is NOT flashed to the ESP32. It contains the markup / CSS / client JS
-  intended for INDEX_HTML, plus a small mock layer at the bottom that fakes the
-  /api/* endpoints (simulated telemetry, preset switching, e-stop, Apply/Save) so
-  you can open it in any browser and judge the look & feel before uploading.
+  This file is NOT flashed to the ESP32. It is the single source of mock truth
+  for the UI: the markup / CSS / client JS below is kept IN SYNC with the
+  INDEX_HTML string in WebInterface.cpp, and the mock layer at the bottom fakes
+  the /api/* endpoints so you can open it in any browser and judge the look &
+  feel (and click through the flows) before uploading. When you change the UI,
+  change it here and in INDEX_HTML together.
 
-  NEW layout being trialled here:
-    * TOP  "Active profile" selector = switches the RUNNING profile immediately
-           (this is the effective profile the car drives with), next to the
-           live readings.
-    * BELOW "Edit / save preset" has its OWN preset selector that only LOADS a
-           preset into the form for editing — it does NOT change what the car is
-           running. "Save preset" persists it to flash; if the saved preset is the
-           ACTIVE one, it is also applied to the car immediately (and a renamed
-           preset updates the lists right away).
+  LAYOUT — two pages via a top nav:
+    * 🏎️ Drive  : e-stop, active-profile selector, live dashboard, and the
+                   per-profile preset editor (so you can tune & test-drive).
+    * ⚙️ Config : GLOBAL vehicle setup only (pedal calibration + motion
+                   thresholds + wheel size). One-time, portable per car.
 
-  Firmware side (IMPLEMENTED in WebInterface.cpp — keep this preview in sync):
-    - /api/state returns each preset's full tunables (so the editor can load a
-      non-active preset without a round-trip).
-    - /api/savePreset takes an `index` (the edit target); when index == active
-      slot it also publishes the values live.
-    - /api/limits (the old "Apply live") was removed.
+  KEY BEHAVIOURS (mirrored by the firmware):
+    * CONFIG MODE: opening the Config page tells the firmware to DISABLE drive
+      output (POST /api/configMode). Pedals & the direction switch are still
+      read (for calibration) but the cart commands zero torque — safe to press
+      everything while setting up. Leaving Config re-enables driving.
+    * CALIBRATION GATE: until a valid calibration exists (state.calibrated AND
+      pressed > released for both pedals) the UI stays on Config and the Drive
+      page is disabled. First boot on fresh NVS therefore lands on Config.
+    * AUTO-CALIBRATE: guided buttons for throttle & brake. "Hold full, then
+      release"; it captures raw min/max, validates (min < max with >= 500 counts
+      between them, else fails), applies a small inward margin, and fills the
+      fields. You still review & Save.
+    * SPEED IN km/h: enter a wheel diameter (mm) and the top-speed fields are
+      shown/entered in km/h (with a disabled rpm readout beside them); the small
+      rpm thresholds stay in rpm (with a disabled km/h readout). The control loop
+      stays in rpm — conversion happens only at the UI boundary (km/h -> rpm
+      before POST; the server always clamps in rpm).
+
+  API the mock fakes (matches WebInterface.cpp): GET /api/state (incl.
+  "calibrated", "configMode", calib.wheelDiaMm); POST /api/select, /api/savePreset,
+  /api/saveCalibration (accepts wheelDiaMm; first save marks the device
+  calibrated), /api/configMode {on:0|1}, /api/estop.
   ============================================================================
 -->
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hovercar mini</title>
-<style>
-  :root { color-scheme: dark; }
-  body { font-family: system-ui, sans-serif; margin: 0; background:#111; color:#eee; }
-  header { padding: 12px 16px; background:#1c1c1c; font-weight:600; font-size:18px; }
-  .wrap { padding: 16px; max-width: 560px; margin: 0 auto; }
-  .grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-bottom:16px; }
-  .card { background:#1c1c1c; border-radius:10px; padding:12px 14px; }
-  .card .v { font-size:22px; font-weight:700; }
-  .card .k { font-size:12px; opacity:.6; text-transform:uppercase; letter-spacing:.05em; }
-  .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; }
-  .ok { background:#123d1a; color:#7CFFA0; } .bad { background:#3d1212; color:#ff8080; }
-  fieldset { border:1px solid #333; border-radius:10px; margin-bottom:16px; }
-  legend { padding:0 6px; opacity:.7; }
-  label { display:block; margin:8px 0 2px; font-size:13px; }
-  input, select { width:100%; box-sizing:border-box; padding:8px; background:#111;
-    color:#eee; border:1px solid #333; border-radius:6px; font-size:15px; }
-  .hint { font-size:12px; opacity:.6; margin-top:4px; }
-  .row { display:flex; gap:8px; }
-  button { padding:10px 14px; border:0; border-radius:8px; background:#2b6cff; color:#fff;
-    font-size:15px; font-weight:600; cursor:pointer; }
-  button.secondary { background:#333; }
-  #msg { min-height:18px; font-size:13px; margin-top:8px; }
-  .estop-bar { margin:14px 0 18px; }
-  button.estop { width:100%; background:#c62828; font-size:22px; padding:20px;
-    letter-spacing:.03em; }
-  button.estop:active { background:#8e1c1c; }
-  button.engage { width:100%; background:#1a7f37; font-size:19px; padding:18px; }
-  .estop-status { width:100%; box-sizing:border-box; text-align:center; padding:20px;
-    border-radius:8px; background:#3d1212; color:#ff8080; font-size:19px; font-weight:700; }
-  .active-sel select { font-size:17px; font-weight:600; padding:10px; }
-</style></head>
-<body>
-<header>🏎️ Hovercar mini controller</header>
-<div class="wrap">
-  <div class="estop-bar">
-    <button id="stopBtn" class="estop" onclick="doStop()">■ EMERGENCY STOP</button>
-    <div id="stopStatus" class="estop-status" style="display:none">⏳ Braking to a stop…</div>
-    <button id="engageBtn" class="engage" onclick="doEngage()" style="display:none">▶ Engage</button>
-  </div>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hovercar BigBoy</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        font-family: system-ui, sans-serif;
+        margin: 0;
+        background: #111;
+        color: #eee;
+      }
+      header {
+        padding: 12px 16px;
+        background: #1c1c1c;
+        font-weight: 600;
+        font-size: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .nav {
+        display: flex;
+        gap: 8px;
+      }
+      .nav button {
+        background: #333;
+        color: #fff;
+        border: 0;
+        border-radius: 8px;
+        font-size: 14px;
+        font-weight: 600;
+        padding: 8px 14px;
+        cursor: pointer;
+      }
+      .nav button.sel {
+        background: #2b6cff;
+      }
+      .wrap {
+        padding: 16px;
+        max-width: 560px;
+        margin: 0 auto;
+      }
+      .page {
+        display: none;
+      }
+      .page.active {
+        display: block;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-bottom: 16px;
+      }
+      .card {
+        background: #1c1c1c;
+        border-radius: 10px;
+        padding: 12px 14px;
+      }
+      .card .v {
+        font-size: 22px;
+        font-weight: 700;
+      }
+      .card .k {
+        font-size: 12px;
+        opacity: 0.6;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .pill {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 999px;
+        font-size: 12px;
+      }
+      .ok {
+        background: #123d1a;
+        color: #7cffa0;
+      }
+      .bad {
+        background: #3d1212;
+        color: #ff8080;
+      }
+      fieldset {
+        border: 1px solid #333;
+        border-radius: 10px;
+        margin-bottom: 16px;
+      }
+      legend {
+        padding: 0 6px;
+        opacity: 0.7;
+      }
+      label {
+        display: block;
+        margin: 8px 0 2px;
+        font-size: 13px;
+      }
+      input,
+      select {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 8px;
+        background: #111;
+        color: #eee;
+        border: 1px solid #333;
+        border-radius: 6px;
+        font-size: 16px;
+      }
+      .hint {
+        font-size: 12px;
+        opacity: 0.6;
+        margin-top: 4px;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+      }
+      button {
+        padding: 10px 14px;
+        border: 0;
+        border-radius: 8px;
+        background: #2b6cff;
+        color: #fff;
+        font-size: 15px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: #333;
+      }
+      input:disabled,
+      button:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+      }
+      input.companion {
+        text-align: center;
+        color: #9ec5ff;
+        opacity: 0.85;
+      }
+      #msg {
+        min-height: 18px;
+        font-size: 13px;
+        margin-top: 8px;
+      }
+      .estop-bar {
+        margin: 14px 0 18px;
+      }
+      button.estop {
+        width: 100%;
+        background: #c62828;
+        font-size: 22px;
+        padding: 20px;
+        letter-spacing: 0.03em;
+      }
+      button.estop:active {
+        background: #8e1c1c;
+      }
+      button.engage {
+        width: 100%;
+        background: #1a7f37;
+        font-size: 19px;
+        padding: 18px;
+      }
+      .estop-status {
+        width: 100%;
+        box-sizing: border-box;
+        text-align: center;
+        padding: 20px;
+        border-radius: 8px;
+        background: #3d1212;
+        color: #ff8080;
+        font-size: 19px;
+        font-weight: 700;
+      }
+      .active-sel select {
+        font-size: 17px;
+        font-weight: 600;
+        padding: 10px;
+      }
+      .cfg-banner {
+        background: #4a3800;
+        color: #ffd466;
+        border: 1px solid #6b5200;
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin-bottom: 16px;
+        font-weight: 600;
+      }
+      .firstrun {
+        background: #123d1a;
+        color: #7cffa0;
+        border: 1px solid #1f6b34;
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin-bottom: 16px;
+        font-weight: 600;
+      }
+      .autocal {
+        background: #12233d;
+        border: 1px solid #24406b;
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin: 12px 0;
+      }
+      #autoCalMsg {
+        min-height: 18px;
+        font-size: 14px;
+        margin-top: 8px;
+        color: #9ec5ff;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span>🏎️ Hovercar BigBoy</span>
+      <div class="nav">
+        <button id="navDrive" class="sel" onclick="showPage('drive')">
+          🏎️ Drive
+        </button>
+        <button id="navConfig" onclick="showPage('config')">⚙️ Config</button>
+      </div>
+    </header>
+    <div class="wrap">
+      <!-- =============================== DRIVE PAGE =============================== -->
+      <div id="pageDrive" class="page active">
+        <div class="estop-bar">
+          <button id="stopBtn" class="estop" onclick="doStop()">
+            ■ EMERGENCY STOP
+          </button>
+          <div id="stopStatus" class="estop-status" style="display: none">
+            ⏳ Braking to a stop…
+          </div>
+          <button
+            id="engageBtn"
+            class="engage"
+            onclick="doEngage()"
+            style="display: none"
+          >
+            ▶ Engage
+          </button>
+        </div>
 
-  <fieldset class="active-sel"><legend>Active profile</legend>
-    <select id="activeSel" onchange="selectActive()"></select>
-    <div class="hint">Switches the running profile <b>immediately</b>.</div>
-  </fieldset>
+        <fieldset class="active-sel">
+          <legend>Active profile</legend>
+          <select id="activeSel" onchange="selectActive()"></select>
+          <div class="hint">Switches the running profile <b>immediately</b>.</div>
+        </fieldset>
 
-  <div class="grid">
-    <div class="card"><div class="k">Driving now</div><div class="v" id="profile">-</div></div>
-    <div class="card"><div class="k">Link</div><div class="v"><span id="link" class="pill">-</span></div></div>
-    <div class="card"><div class="k">Direction</div><div class="v" id="dir">-</div></div>
-    <div class="card"><div class="k">Brake</div><div class="v" id="brake">-</div></div>
-    <div class="card"><div class="k">Battery</div><div class="v" id="batt">-</div></div>
-    <div class="card"><div class="k">Board temp</div><div class="v" id="temp">-</div></div>
-    <div class="card"><div class="k">Speed L / R</div><div class="v" id="speed">-</div></div>
-    <div class="card"><div class="k">Torque out</div><div class="v" id="torque">-</div></div>
-    <div class="card"><div class="k">Throttle</div><div class="v" id="throttle">-</div></div>
-    <div class="card"><div class="k">Brake pedal</div><div class="v" id="brakepct">-</div></div>
-  </div>
+        <div class="grid">
+          <div class="card">
+            <div class="k">Driving now</div>
+            <div class="v" id="profile">-</div>
+          </div>
+          <div class="card">
+            <div class="k">Link</div>
+            <div class="v"><span id="link" class="pill">-</span></div>
+          </div>
+          <div class="card">
+            <div class="k">Direction</div>
+            <div class="v" id="dir">-</div>
+          </div>
+          <div class="card">
+            <div class="k">Brake</div>
+            <div class="v" id="brake">-</div>
+          </div>
+          <div class="card">
+            <div class="k">Battery</div>
+            <div class="v" id="batt">-</div>
+          </div>
+          <div class="card">
+            <div class="k">Board temp</div>
+            <div class="v" id="temp">-</div>
+          </div>
+          <div class="card">
+            <div class="k">Speed</div>
+            <div class="v" id="speedKmh">-</div>
+          </div>
+          <div class="card">
+            <div class="k">Speed L / R (rpm)</div>
+            <div class="v" id="speed">-</div>
+          </div>
+          <div class="card">
+            <div class="k">Torque out</div>
+            <div class="v" id="torque">-</div>
+          </div>
+          <div class="card">
+            <div class="k">Throttle</div>
+            <div class="v" id="throttle">-</div>
+          </div>
+        </div>
 
-  <fieldset><legend>Edit / save preset</legend>
-    <label>Preset to edit</label>
-    <select id="editSel" onchange="loadEditPreset()"></select>
-    <div class="hint">Loads a preset into the form below to review or change it. Saving the
-      <b>active</b> profile also applies it to the car right away.</div>
-    <div id="editNote" style="font-size:12px;opacity:.7;margin:10px 0 6px"></div>
-    <form id="editForm" onsubmit="return false;" autocomplete="off">
-    <label>Preset name</label>
-    <input id="presetName" type="text" maxlength="15" enterkeyhint="next">
-    <div class="hint">Shown in the profile lists above.</div>
+        <fieldset>
+          <legend>Edit / save preset</legend>
+          <label>Preset to edit</label>
+          <select id="editSel" onchange="loadEditPreset()"></select>
+          <div class="hint">
+            Loads a preset into the form below to review or change it. Saving the
+            <b>active</b> profile also applies it to the car right away.
+          </div>
+          <div
+            id="editNote"
+            style="font-size: 12px; opacity: 0.7; margin: 10px 0 6px"
+          ></div>
+          <form id="editForm" onsubmit="return false;" autocomplete="off">
+            <label>Preset name</label>
+            <input id="presetName" type="text" maxlength="15" enterkeyhint="next" />
+            <div class="hint">Shown in the profile lists above.</div>
 
-    <label>Max power (forward)</label>
-    <input id="maxTorque" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next">
-    <div class="hint">How hard it can accelerate forward. 0–1000 (higher = stronger pull).</div>
+            <label>Max power (forward)</label>
+            <input id="maxTorque" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next" />
+            <div class="hint">How hard it can accelerate forward. 0–1000 (higher = stronger pull).</div>
 
-    <label>Top speed (forward)</label>
-    <input id="speedCeiling" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next">
-    <div class="hint">Speed limit the car holds, in wheel rpm. Needs the speed limiter ON (below).</div>
+            <label>Top speed (forward, km/h)</label>
+            <div class="row">
+              <input id="speedCeiling" type="number" inputmode="decimal" step="0.1" min="0" max="60" enterkeyhint="next" style="flex: 3" oninput="updateSpeedCompanions()" />
+              <input id="speedCeiling_rpm" class="companion" type="text" disabled style="flex: 1" title="rpm equivalent" />
+            </div>
+            <div class="hint">km/h — needs the speed limiter ON (below). Right box is the rpm it maps to (uses the wheel size from Config).</div>
 
-    <label>Launch limit</label>
-    <input id="launchTorqueCap" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next">
-    <div class="hint">Power cap from a standstill — softer take-off, less wheelspin. 0–1000.</div>
+            <label>Launch limit</label>
+            <input id="launchTorqueCap" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next" />
+            <div class="hint">Power cap from a standstill — softer take-off, less wheelspin. 0–1000.</div>
 
-    <label>Brake strength</label>
-    <input id="brakeTorqueMax" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next">
-    <div class="hint">How hard the brake pedal stops it. Lower = gentler. 0–1000.</div>
+            <label>Brake strength</label>
+            <input id="brakeTorqueMax" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next" />
+            <div class="hint">How hard the brake pedal stops it. Lower = gentler. 0–1000.</div>
 
-    <label>Limiter strength (P)</label>
-    <input id="pGain" type="number" inputmode="decimal" step="0.01" min="0" max="5" enterkeyhint="next">
-    <div class="hint">Decimal, range 0.0 – 5.0. Instant reaction over the top speed (≈ power cut
-      per rpm over). Higher = firmer, may feel abrupt. Examples: Race 1.5, Kid 2.0 — normal 1.0 – 3.0.</div>
+            <label>Limiter strength (P)</label>
+            <input id="pGain" type="number" inputmode="decimal" step="0.01" min="0" max="5" enterkeyhint="next" />
+            <div class="hint">Decimal, range 0.0 – 5.0. Instant reaction over the top speed. Examples: Race 1.5, Kid 2.0.</div>
 
-    <label>Limiter follow-through (I)</label>
-    <input id="iGain" type="number" inputmode="decimal" step="0.01" min="0" max="1" enterkeyhint="next">
-    <div class="hint">Decimal, range 0.0 – 1.0. Slow trim that builds over ~1 s to hold the exact
-      top speed (also helps climb hills at full pedal). Too high = hunting/wobble. Examples:
-      Race 0.05, Kid 0.10 — normal 0.05 – 0.30.</div>
+            <label>Limiter follow-through (I)</label>
+            <input id="iGain" type="number" inputmode="decimal" step="0.01" min="0" max="1" enterkeyhint="next" />
+            <div class="hint">Decimal, range 0.0 – 1.0. Slow trim that builds over ~1 s to hold the exact top speed.</div>
 
-    <label>Throttle smoothing (forward)</label>
-    <input id="rampMsFullScale" type="number" inputmode="numeric" min="150" max="3000" enterkeyhint="next">
-    <div class="hint">How gradually power comes on — ms to reach full pull. Higher = softer, gentler.</div>
+            <label>Throttle smoothing (forward)</label>
+            <input id="rampMsFullScale" type="number" inputmode="numeric" min="150" max="3000" enterkeyhint="next" />
+            <div class="hint">How gradually power comes on — ms to reach full pull. Higher = softer, gentler.</div>
 
-    <label>Reverse power</label>
-    <input id="reverseMaxTorque" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next">
-    <div class="hint">Max power when driving backwards. 0–1000 (usually lower than forward).</div>
+            <label>Reverse power</label>
+            <input id="reverseMaxTorque" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next" />
+            <div class="hint">Max power when driving backwards. 0–1000 (usually lower than forward).</div>
 
-    <label>Reverse top speed</label>
-    <input id="reverseSpeedCeiling" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="next">
-    <div class="hint">Speed limit while reversing, in wheel rpm.</div>
+            <label>Reverse top speed (km/h)</label>
+            <div class="row">
+              <input id="reverseSpeedCeiling" type="number" inputmode="decimal" step="0.1" min="0" max="60" enterkeyhint="next" style="flex: 3" oninput="updateSpeedCompanions()" />
+              <input id="reverseSpeedCeiling_rpm" class="companion" type="text" disabled style="flex: 1" title="rpm equivalent" />
+            </div>
+            <div class="hint">km/h — speed limit while reversing. Right box is the rpm it maps to (uses the wheel size from Config).</div>
 
-    <label>Reverse smoothing</label>
-    <input id="reverseRampMs" type="number" inputmode="numeric" min="150" max="3000" enterkeyhint="done">
-    <div class="hint">Throttle smoothing when reversing — ms to reach full pull. Higher = softer.</div>
+            <label>Reverse smoothing</label>
+            <input id="reverseRampMs" type="number" inputmode="numeric" min="150" max="3000" enterkeyhint="done" />
+            <div class="hint">Throttle smoothing when reversing — ms to reach full pull. Higher = softer.</div>
 
-    <label>Speed limiter</label>
-    <select id="limitingEnabled"><option value="1">On</option><option value="0">Off</option></select>
-    <div class="hint">Master switch for the top-speed governor (uses the P / I values above).</div>
+            <label>Speed limiter</label>
+            <select id="limitingEnabled">
+              <option value="1">On</option>
+              <option value="0">Off</option>
+            </select>
+            <div class="hint">Master switch for the top-speed governor (uses the P / I values above).</div>
 
-    <div class="row" style="margin-top:14px">
-      <button id="saveBtn" type="button" style="flex:1" onclick="savePreset()">💾 Save preset</button>
+            <div class="row" style="margin-top: 14px">
+              <button id="saveBtn" type="button" style="flex: 1" onclick="savePreset()">
+                💾 Save preset
+              </button>
+            </div>
+          </form>
+        </fieldset>
+      </div>
+
+      <!-- =============================== CONFIG PAGE ============================== -->
+      <div id="pageConfig" class="page">
+        <div class="cfg-banner">
+          ⚙️ Config mode — drive output is <b>DISABLED</b>. Pedals &amp; the
+          direction switch are read for calibration only; the cart will not move.
+        </div>
+        <div id="firstRun" class="firstrun" style="display: none">
+          👋 First-time setup: this car isn’t calibrated yet. Set the pedals and
+          wheel size, Save, then head to Drive.
+        </div>
+
+        <fieldset>
+          <legend>Wheel &amp; live readings</legend>
+          <label>Wheel diameter (mm)</label>
+          <input id="wheelDiaMm" type="number" inputmode="numeric" min="50" max="1000" enterkeyhint="next" oninput="refresh()" />
+          <div class="hint">
+            Sets the rpm → km/h conversion for the whole app. 6.5″ hub ≈ 165 mm,
+            8.5″ ≈ 216 mm, 10″ ≈ 254 mm.
+          </div>
+          <div class="grid" style="margin: 12px 0">
+            <div class="card">
+              <div class="k">Speed now</div>
+              <div class="v" id="cfgKmh">-</div>
+            </div>
+            <div class="card">
+              <div class="k">Speed L / R (rpm)</div>
+              <div class="v" id="cfgRpm">-</div>
+            </div>
+            <div class="card">
+              <div class="k">Throttle raw now</div>
+              <div class="v" id="calThrRaw">-</div>
+            </div>
+            <div class="card">
+              <div class="k">Brake raw now</div>
+              <div class="v" id="calBrkRaw">-</div>
+            </div>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Pedal calibration</legend>
+          <div class="autocal">
+            <div class="row">
+              <button type="button" class="secondary" style="flex: 1" onclick="startAutoCal('throttle')">
+                🎯 Auto-calibrate throttle
+              </button>
+              <button type="button" class="secondary" style="flex: 1" onclick="startAutoCal('brake')">
+                🎯 Auto-calibrate brake
+              </button>
+            </div>
+            <div id="autoCalMsg"></div>
+            <div class="hint">
+              Follow the prompt: hold the pedal fully, then release. It captures
+              min/max (with a small margin) and fills the fields below to review.
+            </div>
+          </div>
+          <form id="calForm" onsubmit="return false;" autocomplete="off">
+            <label>Throttle raw — released (min)</label>
+            <input id="throttleRawMin" type="number" inputmode="numeric" min="0" max="4095" enterkeyhint="next" />
+            <label>Throttle raw — fully pressed (max)</label>
+            <input id="throttleRawMax" type="number" inputmode="numeric" min="0" max="4095" enterkeyhint="next" />
+            <label>Throttle deadband (raw)</label>
+            <input id="throttleDeadband" type="number" inputmode="numeric" min="0" max="500" enterkeyhint="next" />
+            <div class="hint">Low-end raw counts ignored so a resting pedal reads 0 %.</div>
+
+            <label>Brake raw — released (min)</label>
+            <input id="brakeRawMin" type="number" inputmode="numeric" min="0" max="4095" enterkeyhint="next" />
+            <label>Brake raw — fully pressed (max)</label>
+            <input id="brakeRawMax" type="number" inputmode="numeric" min="0" max="4095" enterkeyhint="next" />
+            <label>Brake deadband (raw)</label>
+            <input id="brakeDeadband" type="number" inputmode="numeric" min="0" max="500" enterkeyhint="next" />
+          </form>
+        </fieldset>
+
+        <fieldset>
+          <legend>Motion thresholds</legend>
+          <div class="hint" style="margin-bottom: 8px">
+            These stay in <b>rpm</b> (they're only a few rpm, too small to set precisely in km/h).
+            The greyed box beside each shows the equivalent speed for comparison.
+          </div>
+          <form id="thrForm" onsubmit="return false;" autocomplete="off">
+            <label>Launch speed threshold (rpm)</label>
+            <div class="row">
+              <input id="launchSpeedThresh" type="number" inputmode="numeric" min="1" max="500" enterkeyhint="next" style="flex: 3" oninput="updateSpeedCompanions()" />
+              <input id="launchSpeedThresh_kmh" class="companion" type="text" disabled style="flex: 1" title="km/h equivalent" />
+            </div>
+            <div class="hint">Below this the car is "launching" (launch cap applies) and it's safe to change direction.</div>
+
+            <label>Near-stop threshold (rpm)</label>
+            <div class="row">
+              <input id="nearStopThresh" type="number" inputmode="numeric" min="1" max="500" enterkeyhint="next" style="flex: 3" oninput="updateSpeedCompanions()" />
+              <input id="nearStopThresh_kmh" class="companion" type="text" disabled style="flex: 1" title="km/h equivalent" />
+            </div>
+            <div class="hint">At/below this the car counts as stopped and adopts the direction switch position.</div>
+
+            <label>Brake blend speed (rpm)</label>
+            <div class="row">
+              <input id="brakeBlendSpeed" type="number" inputmode="numeric" min="1" max="500" enterkeyhint="next" style="flex: 3" oninput="updateSpeedCompanions()" />
+              <input id="brakeBlendSpeed_kmh" class="companion" type="text" disabled style="flex: 1" title="km/h equivalent" />
+            </div>
+            <div class="hint">Braking torque tapers to zero below this so the car eases to a stop. Higher = softer stop.</div>
+
+            <label>Pre-reversal brake torque</label>
+            <input id="dirChangeBrakeTorque" type="number" inputmode="numeric" min="0" max="1000" enterkeyhint="done" />
+            <div class="hint">Gentle automatic slow-down applied before a requested reversal is allowed. Small = softer.</div>
+          </form>
+          <div class="row" style="margin-top: 14px">
+            <button id="saveCalBtn" type="button" style="flex: 1" onclick="saveConfig()">
+              💾 Save config
+            </button>
+          </div>
+        </fieldset>
+      </div>
+
+      <div id="msg"></div>
     </div>
-    </form>
-  </fieldset>
-  <div id="msg"></div>
-</div>
 
-<!-- ============================ PREVIEW MOCK ============================ -->
-<!-- Fakes the ESP32 /api/* endpoints. Not present in the firmware build.  -->
-<script>
-(function(){
-  const child = {maxTorque:400,speedCeiling:320,launchTorqueCap:300,brakeTorqueMax:300,pGain:2.0,iGain:0.1,rampMsFullScale:700,reverseMaxTorque:250,reverseSpeedCeiling:150,reverseRampMs:900,limitingEnabled:true};
-  const race  = {maxTorque:1000,speedCeiling:900,launchTorqueCap:1000,brakeTorqueMax:900,pGain:1.5,iGain:0.05,rampMsFullScale:200,reverseMaxTorque:600,reverseSpeedCeiling:400,reverseRampMs:400,limitingEnabled:false};
-  const clone = o => JSON.parse(JSON.stringify(o));
-  let stored = [
-    Object.assign({name:'Kid',      editable:false}, clone(child)),
-    Object.assign({name:'Race',     editable:false}, clone(race)),
-    Object.assign({name:'Preset 3', editable:true},  clone(child)),
-    Object.assign({name:'Preset 4', editable:true},  clone(child)),
-    Object.assign({name:'Preset 5', editable:true},  clone(child)),
-  ];
-  let activeIdx = 0;
-  let live = clone(stored[0]);   // the running tunables the car drives with
-  let estop = false;
-  let simSpeed = 0;              // simulated wheel speed (rpm)
+    <!-- ============================ PREVIEW MOCK ============================ -->
+    <!-- Fakes the ESP32 /api/* endpoints. Not present in the firmware build.  -->
+    <script>
+      (function () {
+        const child = {
+          maxTorque: 400,
+          speedCeiling: 320,
+          launchTorqueCap: 300,
+          brakeTorqueMax: 300,
+          pGain: 2.0,
+          iGain: 0.1,
+          rampMsFullScale: 700,
+          reverseMaxTorque: 250,
+          reverseSpeedCeiling: 150,
+          reverseRampMs: 900,
+          limitingEnabled: true,
+        };
+        const race = {
+          maxTorque: 1000,
+          speedCeiling: 900,
+          launchTorqueCap: 1000,
+          brakeTorqueMax: 900,
+          pGain: 1.5,
+          iGain: 0.05,
+          rampMsFullScale: 200,
+          reverseMaxTorque: 600,
+          reverseSpeedCeiling: 400,
+          reverseRampMs: 400,
+          limitingEnabled: false,
+        };
+        const clone = (o) => JSON.parse(JSON.stringify(o));
+        let stored = [
+          Object.assign({ name: "Kid", editable: false }, clone(child)),
+          Object.assign({ name: "Race", editable: false }, clone(race)),
+          Object.assign({ name: "Preset 3", editable: true }, clone(child)),
+          Object.assign({ name: "Preset 4", editable: true }, clone(child)),
+          Object.assign({ name: "Preset 5", editable: true }, clone(child)),
+        ];
+        let activeIdx = 0;
+        let live = clone(stored[0]); // the running tunables the car drives with
+        let estop = false;
+        let configMode = false; // set while the Config page is open (drive disabled)
+        let calibrated = false; // flips true on first saved config (fresh flash = false)
+        let simSpeed = 0; // simulated wheel speed (rpm)
+        // Global calibration (defaults mirror config.h). One shared set. wheelDiaMm
+        // is the new field driving rpm -> km/h across the app.
+        let calib = {
+          throttleRawMin: 900,
+          throttleRawMax: 2090,
+          throttleDeadband: 60,
+          brakeRawMin: 900,
+          brakeRawMax: 2090,
+          brakeDeadband: 60,
+          launchSpeedThresh: 40,
+          nearStopThresh: 30,
+          brakeBlendSpeed: 80,
+          dirChangeBrakeTorque: 150,
+          wheelDiaMm: 165,
+        };
 
-  const ci = (v,lo,hi) => { v = parseInt(v,10);   if (isNaN(v)) return lo; return Math.max(lo, Math.min(hi, v)); };
-  const cf = (v,lo,hi) => { v = parseFloat(v);    if (isNaN(v)) return lo; return Math.max(lo, Math.min(hi, v)); };
+        const ci = (v, lo, hi) => {
+          v = parseInt(v, 10);
+          if (isNaN(v)) return lo;
+          return Math.max(lo, Math.min(hi, v));
+        };
+        const cf = (v, lo, hi) => {
+          v = parseFloat(v);
+          if (isNaN(v)) return lo;
+          return Math.max(lo, Math.min(hi, v));
+        };
 
-  // Mirrors applyLimitArgs() server-side clamping in WebInterface.cpp.
-  function applyLimits(t, a){
-    if (a.has('maxTorque'))           t.maxTorque           = ci(a.get('maxTorque'),0,1000);
-    if (a.has('speedCeiling'))        t.speedCeiling        = ci(a.get('speedCeiling'),0,1000);
-    if (a.has('launchTorqueCap'))     t.launchTorqueCap     = ci(a.get('launchTorqueCap'),0,1000);
-    if (a.has('brakeTorqueMax'))      t.brakeTorqueMax      = ci(a.get('brakeTorqueMax'),0,1000);
-    if (a.has('pGain'))               t.pGain               = cf(a.get('pGain'),0,20);
-    if (a.has('iGain'))               t.iGain               = cf(a.get('iGain'),0,5);
-    if (a.has('rampMsFullScale'))     t.rampMsFullScale     = ci(a.get('rampMsFullScale'),150,3000);
-    if (a.has('reverseMaxTorque'))    t.reverseMaxTorque    = ci(a.get('reverseMaxTorque'),0,1000);
-    if (a.has('reverseSpeedCeiling')) t.reverseSpeedCeiling = ci(a.get('reverseSpeedCeiling'),0,1000);
-    if (a.has('reverseRampMs'))       t.reverseRampMs       = ci(a.get('reverseRampMs'),150,3000);
-    if (a.has('limitingEnabled'))     t.limitingEnabled     = (a.get('limitingEnabled') !== '0');
-  }
-  // Mirrors applyNameArg() sanitisation (alnum / space / - / _, max 15).
-  function applyName(t, a){
-    if (!a.has('name')) return;
-    let out = '';
-    for (const c of a.get('name')) { if (/[A-Za-z0-9 _-]/.test(c)) out += c; if (out.length >= 15) break; }
-    if (out.length) t.name = out;
-  }
+        // Mirrors applyLimitArgs() server-side clamping in WebInterface.cpp.
+        function applyLimits(t, a) {
+          if (a.has("maxTorque")) t.maxTorque = ci(a.get("maxTorque"), 0, 1000);
+          if (a.has("speedCeiling"))
+            t.speedCeiling = ci(a.get("speedCeiling"), 0, 1000);
+          if (a.has("launchTorqueCap"))
+            t.launchTorqueCap = ci(a.get("launchTorqueCap"), 0, 1000);
+          if (a.has("brakeTorqueMax"))
+            t.brakeTorqueMax = ci(a.get("brakeTorqueMax"), 0, 1000);
+          if (a.has("pGain")) t.pGain = cf(a.get("pGain"), 0, 20);
+          if (a.has("iGain")) t.iGain = cf(a.get("iGain"), 0, 5);
+          if (a.has("rampMsFullScale"))
+            t.rampMsFullScale = ci(a.get("rampMsFullScale"), 150, 3000);
+          if (a.has("reverseMaxTorque"))
+            t.reverseMaxTorque = ci(a.get("reverseMaxTorque"), 0, 1000);
+          if (a.has("reverseSpeedCeiling"))
+            t.reverseSpeedCeiling = ci(a.get("reverseSpeedCeiling"), 0, 1000);
+          if (a.has("reverseRampMs"))
+            t.reverseRampMs = ci(a.get("reverseRampMs"), 150, 3000);
+          if (a.has("limitingEnabled"))
+            t.limitingEnabled = a.get("limitingEnabled") !== "0";
+        }
+        // Mirrors applyCalibArgs() server-side clamping. All speed thresholds are
+        // received in rpm (the client converts km/h -> rpm before POST).
+        function applyCalib(c, a) {
+          if (a.has("throttleRawMin"))
+            c.throttleRawMin = ci(a.get("throttleRawMin"), 0, 4095);
+          if (a.has("throttleRawMax"))
+            c.throttleRawMax = ci(a.get("throttleRawMax"), 0, 4095);
+          if (a.has("throttleDeadband"))
+            c.throttleDeadband = ci(a.get("throttleDeadband"), 0, 500);
+          if (a.has("brakeRawMin"))
+            c.brakeRawMin = ci(a.get("brakeRawMin"), 0, 4095);
+          if (a.has("brakeRawMax"))
+            c.brakeRawMax = ci(a.get("brakeRawMax"), 0, 4095);
+          if (a.has("brakeDeadband"))
+            c.brakeDeadband = ci(a.get("brakeDeadband"), 0, 500);
+          if (a.has("launchSpeedThresh"))
+            c.launchSpeedThresh = ci(a.get("launchSpeedThresh"), 1, 500);
+          if (a.has("nearStopThresh"))
+            c.nearStopThresh = ci(a.get("nearStopThresh"), 1, 500);
+          if (a.has("brakeBlendSpeed"))
+            c.brakeBlendSpeed = ci(a.get("brakeBlendSpeed"), 1, 500);
+          if (a.has("dirChangeBrakeTorque"))
+            c.dirChangeBrakeTorque = ci(a.get("dirChangeBrakeTorque"), 0, 1000);
+          if (a.has("wheelDiaMm"))
+            c.wheelDiaMm = ci(a.get("wheelDiaMm"), 50, 1000);
+        }
+        // Mirrors applyNameArg() sanitisation (alnum / space / - / _, max 15).
+        function applyName(t, a) {
+          if (!a.has("name")) return;
+          let out = "";
+          for (const c of a.get("name")) {
+            if (/[A-Za-z0-9 _-]/.test(c)) out += c;
+            if (out.length >= 15) break;
+          }
+          if (out.length) t.name = out;
+        }
 
-  function buildState(){
-    const now = Date.now()/1000;
-    // Gentle fake telemetry so the dashboard looks alive.
-    const thr = estop ? 0 : Math.max(0, Math.round(55 + 45*Math.sin(now/3)));
-    const target = estop ? 0 : (thr/100) * live.speedCeiling;
-    simSpeed += (target - simSpeed) * (estop ? 0.15 : 0.05);
-    const spd = Math.round(simSpeed);
-    const braking = estop || (simSpeed > target + 20);
-    return {
-      activeName: live.name, selected: activeIdx,
-      presets: stored.map((p,i) => Object.assign({ i }, p)),   // full tunables per preset
-      linkOk: true,
-      batVoltage_cV: Math.round((36.8 + 0.4*Math.sin(now/20)) * 100),
-      boardTemp: Math.round((31 + 3*Math.sin(now/30)) * 10),
-      speedL: spd, speedR: -spd,
-      torqueSent: estop ? 0 : Math.round((thr/100) * live.maxTorque),
-      braking, activeForward: true, reqForward: true,
-      throttlePct: thr, brakePct: estop ? 100 : 0,
-      estop, stopped: spd <= 30,
-    };
-  }
+        function buildState() {
+          const now = Date.now() / 1000;
+          // No drive output while stopped, in config mode, OR uncalibrated. The
+          // uncalibrated case mirrors the firmware, which inhibits driving in the
+          // control task itself (not just the UI) until a calibration is saved.
+          const disabled = estop || configMode || !calibrated;
+          // Gentle fake telemetry so the dashboard looks alive.
+          const thr = disabled
+            ? 0
+            : Math.max(0, Math.round(55 + 45 * Math.sin(now / 3)));
+          const target = disabled ? 0 : (thr / 100) * live.speedCeiling;
+          simSpeed += (target - simSpeed) * (disabled ? 0.15 : 0.05);
+          const spd = Math.round(simSpeed);
+          const braking = estop || simSpeed > target + 20;
+          const brakePct = estop ? 100 : 0;
+          // Fake raw ADC readings consistent with the calibration, so the "raw
+          // now" cards move as the simulated pedals do.
+          const throttleRaw = Math.round(
+            calib.throttleRawMin +
+              (thr / 100) * (calib.throttleRawMax - calib.throttleRawMin),
+          );
+          const brakeRaw = Math.round(
+            calib.brakeRawMin +
+              (brakePct / 100) * (calib.brakeRawMax - calib.brakeRawMin),
+          );
+          return {
+            activeName: live.name,
+            selected: activeIdx,
+            presets: stored.map((p, i) => Object.assign({ i }, p)),
+            calib: clone(calib),
+            calibrated,
+            configMode,
+            linkOk: true,
+            batVoltage_cV: Math.round((36.8 + 0.4 * Math.sin(now / 20)) * 100),
+            boardTemp: Math.round((31 + 3 * Math.sin(now / 30)) * 10),
+            speedL: spd,
+            speedR: -spd,
+            torqueSent: disabled ? 0 : Math.round((thr / 100) * live.maxTorque),
+            braking,
+            activeForward: true,
+            reqForward: true,
+            throttlePct: thr,
+            brakePct,
+            throttleRaw,
+            brakeRaw,
+            estop,
+            stopped: spd <= calib.nearStopThresh,
+          };
+        }
 
-  const resp = (ok, obj, txt) =>
-    Promise.resolve({ ok, json: () => Promise.resolve(obj), text: () => Promise.resolve(txt) });
+        const resp = (ok, obj, txt) =>
+          Promise.resolve({
+            ok,
+            json: () => Promise.resolve(obj),
+            text: () => Promise.resolve(txt),
+          });
 
-  // Route the real client's fetch() calls to the in-page mock.
-  window.fetch = function(url, opts){
-    opts = opts || {};
-    const a = new URLSearchParams(opts.body || '');
-    if (url === '/api/state')       return resp(true, buildState(), '');
-    if (url === '/api/select')    { activeIdx = ci(a.get('index'),0,4); live = clone(stored[activeIdx]); return resp(true, null, 'active profile switched'); }
-    if (url === '/api/savePreset'){ const i = ci(a.get('index'),0,4); if (!stored[i].editable) return resp(false, null, 'preset is read-only');
-                                    const tmp = clone(stored[i]); applyLimits(tmp, a); applyName(tmp, a); stored[i] = tmp; if (i === activeIdx) live = clone(tmp);
-                                    return resp(true, null, 'preset saved (preview)'); }
-    if (url === '/api/estop')     { estop = (a.get('stop') !== '0'); return resp(true, null, estop ? 'emergency stop engaged' : 'engaged - input enabled'); }
-    return resp(false, null, 'not found');
-  };
-})();
-</script>
+        // Route the real client's fetch() calls to the in-page mock.
+        window.fetch = function (url, opts) {
+          opts = opts || {};
+          const a = new URLSearchParams(opts.body || "");
+          if (url === "/api/state") return resp(true, buildState(), "");
+          if (url === "/api/select") {
+            activeIdx = ci(a.get("index"), 0, 4);
+            live = clone(stored[activeIdx]);
+            return resp(true, null, "active profile switched");
+          }
+          if (url === "/api/savePreset") {
+            const i = ci(a.get("index"), 0, 4);
+            if (!stored[i].editable)
+              return resp(false, null, "preset is read-only");
+            const tmp = clone(stored[i]);
+            applyLimits(tmp, a);
+            applyName(tmp, a);
+            stored[i] = tmp;
+            if (i === activeIdx) live = clone(tmp);
+            return resp(true, null, "preset saved (preview)");
+          }
+          if (url === "/api/saveCalibration") {
+            const oldDia = calib.wheelDiaMm;
+            applyCalib(calib, a);
+            const newDia = calib.wheelDiaMm;
+            // Wheel changed: rescale every profile's top/reverse speed so each
+            // keeps the same km/h while its rpm adjusts (mirrors PresetStore).
+            if (newDia !== oldDia && oldDia > 0 && newDia > 0) {
+              for (const p of stored) {
+                p.speedCeiling = Math.max(0, Math.min(1000, Math.round((p.speedCeiling * oldDia) / newDia)));
+                p.reverseSpeedCeiling = Math.max(0, Math.min(1000, Math.round((p.reverseSpeedCeiling * oldDia) / newDia)));
+              }
+              live = clone(stored[activeIdx]);
+            }
+            calibrated = true; // first save marks the device calibrated
+            return resp(true, null, "config saved (preview)");
+          }
+          if (url === "/api/configMode") {
+            configMode = a.get("on") !== "0";
+            return resp(
+              true,
+              null,
+              configMode ? "config mode on (drive disabled)" : "config mode off",
+            );
+          }
+          if (url === "/api/estop") {
+            estop = a.get("stop") !== "0";
+            return resp(
+              true,
+              null,
+              estop ? "emergency stop engaged" : "engaged - input enabled",
+            );
+          }
+          return resp(false, null, "not found");
+        };
+      })();
+    </script>
 
-<!-- ==================== CLIENT JS (intended for INDEX_HTML) ==================== -->
-<script>
-const $ = id => document.getElementById(id);
-const FIELDS = ['maxTorque','speedCeiling','launchTorqueCap','brakeTorqueMax','pGain','iGain',
-                'rampMsFullScale','reverseMaxTorque','reverseSpeedCeiling','reverseRampMs'];
-let presetSig = '';
-let lastPresets = [];
-let editIdx = 0;        // which preset the editor is loaded from (client-only)
-let editInit = false;   // has the editor form been populated once?
+    <!-- ==================== CLIENT JS (intended for INDEX_HTML) ==================== -->
+    <script>
+      const $ = (id) => document.getElementById(id);
 
-function fillForm(p){
-  $('presetName').value = p.name;
-  for (const k of FIELDS) $(k).value = p[k];
-  $('limitingEnabled').value = p.limitingEnabled ? '1' : '0';
-}
+      // Preset-editor fields. speedCeiling / reverseSpeedCeiling are stored in
+      // rpm but shown/entered in km/h (converted at the UI boundary).
+      const FIELDS = [
+        "maxTorque",
+        "speedCeiling",
+        "launchTorqueCap",
+        "brakeTorqueMax",
+        "pGain",
+        "iGain",
+        "rampMsFullScale",
+        "reverseMaxTorque",
+        "reverseSpeedCeiling",
+        "reverseRampMs",
+      ];
+      // Preset speed fields: km/h is the real input, with a disabled rpm readout
+      // (id + "_rpm") beside it.
+      const SPEED_KMH_INPUTS = ["speedCeiling", "reverseSpeedCeiling"];
 
-async function refresh(){
-  try{
-    const r = await fetch('/api/state'); const s = await r.json();
-    lastPresets = s.presets;
-    // Readings
-    $('profile').textContent = s.activeName;
-    $('link').textContent = s.linkOk ? 'OK' : 'LOST';
-    $('link').className = 'pill ' + (s.linkOk ? 'ok' : 'bad');
-    $('batt').textContent = (s.batVoltage_cV/100).toFixed(2) + ' V';
-    $('temp').textContent = (s.boardTemp/10).toFixed(1) + ' °C';
-    $('speed').textContent = s.speedL + ' / ' + s.speedR;
-    $('torque').textContent = s.torqueSent;
-    const act = s.activeForward ? 'FWD' : 'REV';
-    const req = s.reqForward ? 'FWD' : 'REV';
-    $('dir').textContent = (act === req) ? act : (act + '→' + req);
-    $('brake').innerHTML = s.braking ? '<span class="pill bad">ON</span>' : '<span class="pill ok">off</span>';
-    $('throttle').textContent = s.throttlePct + ' %';
-    $('brakepct').textContent = s.brakePct + ' %';
-    // Emergency-stop UI.
-    if (!s.estop) { hide('engageBtn'); hide('stopStatus'); show('stopBtn'); }
-    else          { hide('stopBtn'); show('engageBtn'); s.stopped ? hide('stopStatus') : show('stopStatus'); }
-    // Rebuild both dropdowns only when the name list changes.
-    const sig = s.presets.map(p=>p.i+':'+p.name).join('|');
-    if (sig !== presetSig){
-      presetSig = sig;
-      const opts = s.presets.map(p=>`<option value="${p.i}">${p.name}${p.editable?'':' 🔒'}</option>`).join('');
-      $('activeSel').innerHTML = opts;
-      $('editSel').innerHTML = opts;
-    }
-    // Active selector tracks the running profile (unless the user is mid-select).
-    if (document.activeElement !== $('activeSel')) $('activeSel').value = s.selected;
-    // Populate the editor once (defaults to the active profile), then only on
-    // explicit user change — never stomp in-progress edits from the poll.
-    if (!editInit){ editInit = true; editIdx = s.selected; $('editSel').value = editIdx; fillForm(s.presets[editIdx]); }
-    if (document.activeElement !== $('editSel')) $('editSel').value = editIdx;
-    // Editability follows the EDIT target (not the active profile).
-    const ep = s.presets[editIdx] || {};
-    const ed = !!ep.editable;
-    for (const k of ['presetName', ...FIELDS, 'limitingEnabled', 'saveBtn']) $(k).disabled = !ed;
-    const isActive = (editIdx === s.selected);
-    $('editNote').textContent = ed
-      ? (isActive
-          ? 'Editing “'+ep.name+'” — the ACTIVE profile. Save writes it to flash and applies it to the car now.'
-          : 'Editing “'+ep.name+'”. Save writes it to flash; switch it to Active above to drive with it.')
-      : 'Built-in preset — read-only. Pick preset 3–5 to customise & save.';
-  }catch(e){ $('link').textContent='NO ESP'; $('link').className='pill bad'; }
-}
-function show(id){ $(id).style.display=''; }
-function hide(id){ $(id).style.display='none'; }
-async function post(url, extra){
-  const p = new URLSearchParams();
-  for (const k in extra) p.set(k, extra[k]);
-  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:p});
-  const t = await r.text();
-  $('msg').textContent = (r.ok ? '✓ ' : '✗ ') + t;
-  $('msg').style.color = r.ok ? '#7CFFA0' : '#ff8080';
-  refresh();
-}
-function doStop(){ post('/api/estop', {stop:1}); }
-function doEngage(){ post('/api/estop', {stop:0}); }
-// Top selector: switch the RUNNING profile immediately.
-function selectActive(){ post('/api/select', {index:$('activeSel').value}); }
-// Editor selector: load a preset into the form ONLY (no apply, no network).
-function loadEditPreset(){
-  editIdx = parseInt($('editSel').value, 10);
-  const p = lastPresets[editIdx];
-  if (p) fillForm(p);
-  refresh();   // refresh enable/disable + note for the new edit target
-}
-function limitFields(){
-  const o = {};
-  for (const k of FIELDS) o[k] = $(k).value;
-  o.limitingEnabled = $('limitingEnabled').value;
-  return o;
-}
-// Save acts on the EDIT target (editIdx). If that's the active profile, the
-// server applies it live too; a name change shows up in the lists immediately.
-function savePreset(){ post('/api/savePreset', Object.assign({index:editIdx, name:$('presetName').value}, limitFields())); }
-// Enter/Next on the mobile keyboard advances to the next field (last one blurs).
-(function(){
-  const els = Array.from(document.querySelectorAll('#editForm input'));
-  els.forEach((el, i) => el.addEventListener('keydown', e => {
-    if (e.key === 'Enter'){ e.preventDefault(); const n = els[i+1]; n ? n.focus() : el.blur(); }
-  }));
-})();
-// Self-scheduling poll.
-const REFRESH_MS = 200;
-(async function poll(){ await refresh(); setTimeout(poll, REFRESH_MS); })();
-</script>
-</body></html>
+      // Global-config fields. All stored/POSTed as-is (raw counts / rpm / torque /
+      // mm) — no km/h conversion on the wire; the control loop stays in rpm.
+      const CAL_FIELDS = [
+        "throttleRawMin",
+        "throttleRawMax",
+        "throttleDeadband",
+        "brakeRawMin",
+        "brakeRawMax",
+        "brakeDeadband",
+        "dirChangeBrakeTorque",
+        "wheelDiaMm",
+        "launchSpeedThresh",
+        "nearStopThresh",
+        "brakeBlendSpeed",
+      ];
+      // Config threshold fields: rpm is the real input, with a disabled km/h
+      // readout (id + "_kmh") beside it for comparison.
+      const SPEED_RPM_INPUTS = [
+        "launchSpeedThresh",
+        "nearStopThresh",
+        "brakeBlendSpeed",
+      ];
+
+      let presetSig = "";
+      let lastPresets = [];
+      let editIdx = 0; // which preset the editor is loaded from (client-only)
+      let editInit = false; // has the editor form been populated once?
+      let calInit = false; // has the config form been populated once?
+      let currentPage = "drive";
+      let autoCal = null; // pedal auto-calibration state machine
+      let lastCalib = {};
+
+      // ---- rpm <-> km/h. Wheel size comes from the live input if present (so the
+      // readouts update as you type), else from the last saved calibration. ----
+      function wheelDiaMm() {
+        const v = parseFloat($("wheelDiaMm").value);
+        return v > 0 ? v : lastCalib.wheelDiaMm || 165;
+      }
+      function rpmToKmh(rpm) {
+        return rpm * Math.PI * (wheelDiaMm() / 1000) * 0.06;
+      }
+      function kmhToRpm(kmh) {
+        const f = Math.PI * (wheelDiaMm() / 1000) * 0.06;
+        return f > 0 ? kmh / f : 0;
+      }
+      const round1 = (x) => Math.round(x * 10) / 10;
+
+      // Refresh the disabled companion readouts next to each speed input, in both
+      // directions. Cheap; called on input, on wheel-size change, and each poll.
+      function updateSpeedCompanions() {
+        for (const k of SPEED_KMH_INPUTS) {
+          const el = $(k + "_rpm");
+          if (el)
+            el.value = Math.round(kmhToRpm(parseFloat($(k).value) || 0)) + " rpm";
+        }
+        for (const k of SPEED_RPM_INPUTS) {
+          const el = $(k + "_kmh");
+          if (el)
+            el.value = rpmToKmh(parseFloat($(k).value) || 0).toFixed(1) + " km/h";
+        }
+      }
+
+      // Calibration counts as present only if the flag is set AND the stored data
+      // is actually valid (pressed > released for both pedals) — belt & braces so
+      // a stale flag or empty blob can't unlock driving.
+      function calibValid(s) {
+        return !!(
+          s &&
+          s.calibrated &&
+          s.calib &&
+          s.calib.throttleRawMax > s.calib.throttleRawMin &&
+          s.calib.brakeRawMax > s.calib.brakeRawMin
+        );
+      }
+
+      // ---- Page navigation. Entering Config puts the firmware in config mode
+      // (drive output disabled); leaving it re-enables driving. ----
+      function showPage(name) {
+        currentPage = name;
+        $("pageDrive").classList.toggle("active", name === "drive");
+        $("pageConfig").classList.toggle("active", name === "config");
+        $("navDrive").classList.toggle("sel", name === "drive");
+        $("navConfig").classList.toggle("sel", name === "config");
+        postQuiet("/api/configMode", { on: name === "config" ? 1 : 0 });
+        window.scrollTo(0, 0);
+      }
+
+      function fillForm(p) {
+        $("presetName").value = p.name;
+        for (const k of FIELDS)
+          $(k).value = SPEED_KMH_INPUTS.includes(k)
+            ? round1(rpmToKmh(p[k]))
+            : p[k];
+        $("limitingEnabled").value = p.limitingEnabled ? "1" : "0";
+        updateSpeedCompanions();
+      }
+
+      async function refresh() {
+        try {
+          const r = await fetch("/api/state");
+          const s = await r.json();
+          lastPresets = s.presets;
+          lastCalib = s.calib || {};
+          // Calibration gate: until valid calibration exists, keep the user on
+          // Config and disable the Drive page entirely.
+          const calOk = calibValid(s);
+          $("navDrive").disabled = !calOk;
+          $("firstRun").style.display = calOk ? "none" : "";
+          if (!calOk && currentPage !== "config") showPage("config");
+
+          // ----- Drive dashboard -----
+          $("profile").textContent = s.activeName;
+          $("link").textContent = s.linkOk ? "OK" : "LOST";
+          $("link").className = "pill " + (s.linkOk ? "ok" : "bad");
+          $("batt").textContent = (s.batVoltage_cV / 100).toFixed(2) + " V";
+          $("temp").textContent = (s.boardTemp / 10).toFixed(1) + " °C";
+          $("speed").textContent = s.speedL + " / " + s.speedR;
+          const kmhNow = rpmToKmh((Math.abs(s.speedL) + Math.abs(s.speedR)) / 2);
+          $("speedKmh").textContent = kmhNow.toFixed(1) + " km/h";
+          $("torque").textContent = s.torqueSent;
+          const act = s.activeForward ? "FWD" : "REV";
+          const req = s.reqForward ? "FWD" : "REV";
+          $("dir").textContent = act === req ? act : act + "→" + req;
+          $("brake").innerHTML = s.braking
+            ? '<span class="pill bad">ON</span>'
+            : '<span class="pill ok">off</span>';
+          $("throttle").textContent = s.throttlePct + " %";
+          // Emergency-stop UI.
+          if (!s.estop) {
+            hide("engageBtn");
+            hide("stopStatus");
+            show("stopBtn");
+          } else {
+            hide("stopBtn");
+            show("engageBtn");
+            s.stopped ? hide("stopStatus") : show("stopStatus");
+          }
+          // Rebuild both preset dropdowns only when the name list changes.
+          const sig = s.presets.map((p) => p.i + ":" + p.name).join("|");
+          if (sig !== presetSig) {
+            presetSig = sig;
+            const opts = s.presets
+              .map(
+                (p) =>
+                  `<option value="${p.i}">${p.name}${p.editable ? "" : " 🔒"}</option>`,
+              )
+              .join("");
+            $("activeSel").innerHTML = opts;
+            $("editSel").innerHTML = opts;
+          }
+          if (document.activeElement !== $("activeSel"))
+            $("activeSel").value = s.selected;
+          if (!editInit) {
+            editInit = true;
+            editIdx = s.selected;
+            $("editSel").value = editIdx;
+            fillForm(s.presets[editIdx]);
+          }
+          if (document.activeElement !== $("editSel"))
+            $("editSel").value = editIdx;
+          const ep = s.presets[editIdx] || {};
+          const ed = !!ep.editable;
+          for (const k of ["presetName", ...FIELDS, "limitingEnabled", "saveBtn"])
+            $(k).disabled = !ed;
+          const isActive = editIdx === s.selected;
+          $("editNote").textContent = ed
+            ? isActive
+              ? "Editing “" +
+                ep.name +
+                "” — the ACTIVE profile. Save writes it to flash and applies it to the car now."
+              : "Editing “" +
+                ep.name +
+                "”. Save writes it to flash; switch it to Active above to drive with it."
+            : "Built-in preset — read-only. Pick preset 3–5 to customise & save.";
+
+          // ----- Config page live readings -----
+          $("cfgRpm").textContent = s.speedL + " / " + s.speedR;
+          $("cfgKmh").textContent = kmhNow.toFixed(1) + " km/h";
+          $("calThrRaw").textContent = s.throttleRaw;
+          $("calBrkRaw").textContent = s.brakeRaw;
+          // Populate the config form once — never stomp in-progress edits.
+          if (!calInit && s.calib) {
+            calInit = true;
+            for (const k of CAL_FIELDS) if ($(k)) $(k).value = s.calib[k];
+          }
+          // Keep companion readouts in sync (also covers a wheel-size change).
+          updateSpeedCompanions();
+          // Drive the auto-calibrate capture off the live raw readings.
+          tickAutoCal(s);
+        } catch (e) {
+          $("link").textContent = "NO ESP";
+          $("link").className = "pill bad";
+        }
+      }
+      function show(id) {
+        $(id).style.display = "";
+      }
+      function hide(id) {
+        $(id).style.display = "none";
+      }
+      async function post(url, extra) {
+        const p = new URLSearchParams();
+        for (const k in extra) p.set(k, extra[k]);
+        const r = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: p,
+        });
+        const t = await r.text();
+        $("msg").textContent = (r.ok ? "✓ " : "✗ ") + t;
+        $("msg").style.color = r.ok ? "#7CFFA0" : "#ff8080";
+        refresh();
+      }
+      // Like post() but doesn't touch the #msg toast (for background calls).
+      async function postQuiet(url, extra) {
+        const p = new URLSearchParams();
+        for (const k in extra) p.set(k, extra[k]);
+        try {
+          await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: p,
+          });
+        } catch (e) {}
+      }
+      function doStop() {
+        post("/api/estop", { stop: 1 });
+      }
+      function doEngage() {
+        post("/api/estop", { stop: 0 });
+      }
+      function selectActive() {
+        post("/api/select", { index: $("activeSel").value });
+      }
+      function loadEditPreset() {
+        editIdx = parseInt($("editSel").value, 10);
+        const p = lastPresets[editIdx];
+        if (p) fillForm(p);
+        refresh();
+      }
+      function limitFields() {
+        const o = {};
+        for (const k of FIELDS)
+          o[k] = SPEED_KMH_INPUTS.includes(k)
+            ? Math.round(kmhToRpm(parseFloat($(k).value) || 0))
+            : $(k).value;
+        o.limitingEnabled = $("limitingEnabled").value;
+        return o;
+      }
+      function savePreset() {
+        post(
+          "/api/savePreset",
+          Object.assign(
+            { index: editIdx, name: $("presetName").value },
+            limitFields(),
+          ),
+        );
+      }
+      // Save global config. Every field is sent as-is (rpm / raw counts / mm);
+      // the firmware clamps and stores in rpm — no km/h ever crosses the wire.
+      function saveConfig() {
+        const o = {};
+        for (const k of CAL_FIELDS) o[k] = $(k).value;
+        post("/api/saveCalibration", o);
+      }
+
+      // ---- Auto-calibrate: a two-phase guided capture driven by the poll loop.
+      // Phase 'press' (hold full) then 'release'. Min/max are tracked across the
+      // whole window, so the released value becomes min and the pressed value max
+      // regardless of phase; the phases just cue the user and time the capture. ----
+      const AUTOCAL_PHASE_MS = 5000;
+      const AUTOCAL_MIN_SPAN = 500; // min raw counts required between released & pressed
+      function startAutoCal(kind) {
+        autoCal = {
+          kind,
+          phase: "press",
+          tEnd: Date.now() + AUTOCAL_PHASE_MS,
+          min: 4095,
+          max: 0,
+        };
+        renderAutoCal();
+      }
+      function tickAutoCal(s) {
+        if (!autoCal) return;
+        const raw = autoCal.kind === "throttle" ? s.throttleRaw : s.brakeRaw;
+        autoCal.min = Math.min(autoCal.min, raw);
+        autoCal.max = Math.max(autoCal.max, raw);
+        if (Date.now() >= autoCal.tEnd) {
+          if (autoCal.phase === "press") {
+            autoCal.phase = "release";
+            autoCal.tEnd = Date.now() + AUTOCAL_PHASE_MS;
+          } else {
+            finishAutoCal();
+            return;
+          }
+        }
+        renderAutoCal();
+      }
+      function renderAutoCal() {
+        if (!autoCal) {
+          $("autoCalMsg").textContent = "";
+          return;
+        }
+        const secs = Math.max(0, Math.ceil((autoCal.tEnd - Date.now()) / 1000));
+        const name = autoCal.kind === "throttle" ? "THROTTLE" : "BRAKE";
+        $("autoCalMsg").textContent =
+          autoCal.phase === "press"
+            ? `Press & HOLD the ${name} fully… ${secs}s`
+            : `Now RELEASE the ${name} completely… ${secs}s`;
+      }
+      function finishAutoCal() {
+        const kind = autoCal.kind,
+          lo0 = autoCal.min,
+          hi0 = autoCal.max;
+        autoCal = null;
+        const span = hi0 - lo0;
+        // Validate: must have a real range (min < max) with enough travel between
+        // them, otherwise the capture is junk (pedal not pressed, or noise only).
+        if (hi0 <= lo0 || span < AUTOCAL_MIN_SPAN) {
+          $("autoCalMsg").textContent = `✗ ${kind} calibration failed: need min < max with at least ${AUTOCAL_MIN_SPAN} counts between them (got min ${lo0}, max ${hi0}). Try again — hold the pedal fully, then release.`;
+          return;
+        }
+        const margin = Math.max(20, Math.round(span * 0.05)); // small inward margin
+        const lo = lo0 + margin;
+        const hi = hi0 - margin;
+        if (kind === "throttle") {
+          $("throttleRawMin").value = lo;
+          $("throttleRawMax").value = hi;
+        } else {
+          $("brakeRawMin").value = lo;
+          $("brakeRawMax").value = hi;
+        }
+        $("autoCalMsg").textContent = `✓ ${kind} captured: min ${lo}, max ${hi}. Review & Save config.`;
+      }
+
+      // Enter/Next on the mobile keyboard advances to the next field (last one blurs).
+      (function () {
+        const els = Array.from(
+          document.querySelectorAll(
+            "#editForm input:not(.companion), #calForm input, #thrForm input:not(.companion)",
+          ),
+        );
+        els.forEach((el, i) =>
+          el.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              const n = els[i + 1];
+              n ? n.focus() : el.blur();
+            }
+          }),
+        );
+      })();
+      // iOS: the numeric keypad has no "Done" key and tapping empty space doesn't
+      // blur an input, so the keyboard can get stuck. Tapping anything that isn't
+      // itself a field dismisses it (buttons still fire their click after blur).
+      document.addEventListener("pointerdown", (e) => {
+        const a = document.activeElement;
+        if (
+          a &&
+          (a.tagName === "INPUT" || a.tagName === "SELECT" || a.tagName === "TEXTAREA") &&
+          !e.target.closest("input, select, textarea, label")
+        )
+          a.blur();
+      });
+      // Self-scheduling poll.
+      const REFRESH_MS = 200;
+      (async function poll() {
+        await refresh();
+        setTimeout(poll, REFRESH_MS);
+      })();
+    </script>
+  </body>
+</html>

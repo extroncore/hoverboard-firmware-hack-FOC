@@ -22,8 +22,10 @@ int16_t mapPedal(int raw, int rawMin, int rawMax, int deadband, int16_t outMax);
 int16_t applySpeedLimiter(int16_t baseTorque, int16_t measuredSpeedAbs,
                           int rawPedal, const Tunables &t, float &iError);
 
-// Clamp torque to the launch cap while the car is essentially stationary.
-int16_t applyLaunchCap(int16_t torque, int16_t measuredSpeedAbs, int16_t launchCap);
+// Clamp torque to the launch cap while the car is essentially stationary
+// (below launchSpeedThresh abs rpm).
+int16_t applyLaunchCap(int16_t torque, int16_t measuredSpeedAbs, int16_t launchCap,
+                       int16_t launchSpeedThresh);
 
 // Slew-limit `current` toward `target`. rampMsFullScale is the time for a full
 // 0..1000 sweep; loopMs is the control period. Returns the new current value.

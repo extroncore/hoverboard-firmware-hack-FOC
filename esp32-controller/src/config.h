@@ -24,7 +24,7 @@
 // is independent of the Serial2 link to the hoverboard. View it with:
 //   pio device monitor -e esp32dev
 // Set to 0 to silence once bring-up is done.
-#define DEBUG_LOG 1
+#define DEBUG_LOG 0
 #define DEBUG_LOG_PERIOD_MS 500
 
 // -------------------------- Pedals (throttle + brake) -----------------------
@@ -67,6 +67,21 @@
 // can be firmer than this; this is only the automatic pre-reversal slow-down.
 #define DIR_CHANGE_BRAKE_TORQUE 150
 
+// Drive-wheel diameter (mm). Only used to convert rpm <-> km/h in the web UI;
+// the control loop is entirely in rpm. 6.5" hub ~165, 8.5" ~216, 10" ~254.
+#define WHEEL_DIA_MM 165
+
+// -------------------------- Calibration defaults ----------------------------
+// The pedal-mapping and motion-threshold values above are DEFAULTS only: they
+// seed the global Calibration blob on first boot (empty flash). After that the
+// live values come from NVS and are editable in the web UI. Field order must
+// match struct Calibration in shared_state.h.
+#define CALIBRATION_DEFAULT {                                  \
+    THROTTLE_RAW_MIN, THROTTLE_RAW_MAX, THROTTLE_DEADBAND_RAW, \
+    BRAKE_RAW_MIN, BRAKE_RAW_MAX, BRAKE_DEADBAND_RAW,          \
+    LAUNCH_SPEED_THRESH, NEAR_STOP_THRESH, BRAKE_BLEND_SPEED,  \
+    DIR_CHANGE_BRAKE_TORQUE, WHEEL_DIA_MM}
+
 // Sign calibration (set on the bench).
 //  * SPEED_L_SIGN / SPEED_R_SIGN: the two hub motors are mounted mirror-image, so
 //    they report OPPOSITE hall-speed signs for the same physical direction. These
@@ -86,7 +101,7 @@
 // The ESP32 hosts its own network; the phone connects directly (default URL
 // http://192.168.4.1). AP_PASSWORD "" = OPEN network (no password) for easy
 // access. To secure it, set a password of >= 8 characters (enables WPA2).
-#define AP_SSID "Hovercar mini"
+#define AP_SSID "Hovercar BigBoy"
 #define AP_PASSWORD "" // "" = open AP; >=8 chars enables WPA2
 #define AP_CHANNEL 1
 #define AP_MAX_CLIENTS 4
@@ -109,6 +124,14 @@
 #define RAMP_MS_MIN 150 // never faster than the board slew ceiling (~167 ms)
 #define RAMP_MS_MAX 3000
 
+// Bounds the web layer clamps the global Calibration fields to. Pedal raw values
+// are 12-bit ADC counts; the speed thresholds are abs wheel rpm.
+#define ADC_RAW_MAX 4095     // 12-bit ADC full scale (analogReadResolution(12))
+#define DEADBAND_RAW_MAX 500 // sane ceiling for a low-end pedal deadband
+#define SPEED_THRESH_MAX 500 // rpm ceiling for launch / near-stop / blend thresholds
+#define WHEEL_DIA_MM_MIN 50   // smallest sane drive-wheel diameter (mm)
+#define WHEEL_DIA_MM_MAX 1000 // largest sane drive-wheel diameter (mm)
+
 // -------------------------- Default drive profiles --------------------------
 // The car BOOTS into the most restrictive profile (index 0 = "child") at zero
 // torque. Profiles are starting points - all values are tunable live over the
@@ -122,5 +145,11 @@
 // brakeTorqueMax is kept <= maxTorque so the car never brakes harder than it can
 // drive (prevents the wheels being spun backwards past traction). Reverse is
 // deliberately weaker/slower/gentler than forward for a kids' car.
+//
+// speedCeiling / reverseSpeedCeiling here are rpm AT THE REFERENCE WHEEL
+// (WHEEL_DIA_MM). PresetStore rescales them to the actual wheel at boot so each
+// profile's TOP SPEED stays constant in km/h regardless of the fitted tire
+// (e.g. child ~10 km/h fwd / ~4.7 km/h rev at 165 mm). Change the tire, keep the
+// speed.
 #define PROFILE_CHILD {"child", 400, 300, 320, 2.0f, 0.1f, 1000.0f, -700.0f, 3000, 700, true, 300, 250, 150, 900}
 #define PROFILE_RACE {"race", 1000, 1000, 900, 1.5f, 0.05f, 800.0f, -400.0f, 3500, 200, false, 900, 600, 400, 400}

@@ -26,14 +26,26 @@ public:
   void select(int i);                             // make slot i the live/active preset
   void saveUserPreset(int i, const Tunables &t);  // persist into slot i (2..4 only)
 
+  // Global vehicle calibration (pedal mapping + motion thresholds). One shared
+  // set for the whole car; persisted alongside the presets.
+  const Calibration &calibration() const { return _cal; }
+  void saveCalibration(const Calibration &c);     // persist + publish live
+
+  // True once a calibration has actually been saved to NVS (not just the
+  // config.h defaults). The web UI gates driving on this + a data sanity check.
+  bool calibrated() const { return _calibrated; }
+
 private:
   Tunables    _p[COUNT];
+  Calibration _cal{};
+  bool        _calibrated = false;
   int         _sel = 0;
   Preferences _prefs;
 
   void loadBuiltinsAndDefaults();
   void persistSel();
   void persistPreset(int i);
+  void persistCalibration();
 };
 
 extern PresetStore g_presets;

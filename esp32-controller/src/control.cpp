@@ -50,8 +50,9 @@ int16_t applySpeedLimiter(int16_t baseTorque, int16_t measuredSpeedAbs,
   return torque;
 }
 
-int16_t applyLaunchCap(int16_t torque, int16_t measuredSpeedAbs, int16_t launchCap) {
-  if (measuredSpeedAbs < LAUNCH_SPEED_THRESH && torque > launchCap) {
+int16_t applyLaunchCap(int16_t torque, int16_t measuredSpeedAbs, int16_t launchCap,
+                       int16_t launchSpeedThresh) {
+  if (measuredSpeedAbs < launchSpeedThresh && torque > launchCap) {
     return launchCap;
   }
   return torque;
