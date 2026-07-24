@@ -4,6 +4,7 @@
 // ============================================================================
 #pragma once
 #include <Arduino.h>
+#include "config.h"
 
 // Live-editable control parameters (a profile's values copied in, then tuned).
 struct Tunables {
@@ -126,15 +127,20 @@ public:
   // Config mode: while set, the control task commands zero drive torque (the web
   // Config page is open). Pedals/switch are still read and telemetry still flows,
   // so calibration works, but nothing can make the cart drive.
+  //
+  // Dead-man: stored as a deadline, not a latched flag. setConfigMode(true) is a
+  // heartbeat that pushes the deadline out by CONFIG_MODE_TIMEOUT_MS; the Config
+  // page repeats it while open. If the heartbeats stop (client gone) the deadline
+  // passes and config mode clears itself, so the car doesn't stay undrivable.
   bool getConfigMode() {
     xSemaphoreTake(_mutex, portMAX_DELAY);
-    bool c = _configMode;
+    uint32_t deadline = _configModeDeadlineMs;
     xSemaphoreGive(_mutex);
-    return c;
+    return deadline != 0 && (int32_t)(millis() - deadline) < 0;  // wrap-safe
   }
-  void setConfigMode(bool c) {
+  void setConfigMode(bool on) {
     xSemaphoreTake(_mutex, portMAX_DELAY);
-    _configMode = c;
+    _configModeDeadlineMs = on ? (millis() + CONFIG_MODE_TIMEOUT_MS) : 0;
     xSemaphoreGive(_mutex);
   }
 
@@ -159,7 +165,7 @@ private:
   Calibration _calibration{};
   Telemetry   _telemetry{};
   bool        _estop = false;
-  bool        _configMode = false;
+  uint32_t    _configModeDeadlineMs = 0;  // 0 = off; else millis() deadline
   bool        _calibrated = false;
 };
 

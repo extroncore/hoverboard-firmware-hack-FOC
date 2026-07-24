@@ -21,6 +21,7 @@ private:
   IPAddress _apIP;
 
   void handleRoot();
+  void handlePortal();              // minimal, field-free launcher shown in the iOS captive sheet
   void handleGetState();            // lean live telemetry (polled at REFRESH_MS)
   void handleGetConfig();           // presets + calibration (fetched on load / after saves)
   void handleSelect();             // choose the active (running) preset

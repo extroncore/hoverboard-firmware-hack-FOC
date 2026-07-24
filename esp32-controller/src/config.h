@@ -19,6 +19,13 @@
 // command zero torque (host-side watchdog; the firmware has its own dead-man).
 #define LINK_TIMEOUT_MS 500
 
+// Config mode (drive inhibited) is a dead-man: the web Config page keeps it alive
+// with a periodic heartbeat. If the heartbeats stop for this long (phone
+// disconnected, tab closed/backgrounded) it lapses on its own, so a calibrated
+// car with nobody actually tuning it returns to drive mode instead of staying
+// stuck undrivable. Must comfortably exceed the client's heartbeat interval.
+#define CONFIG_MODE_TIMEOUT_MS 4000
+
 // -------------------------- Debug logging (USB / UART0) ---------------------
 // Prints a live status line to the USB serial monitor (Serial / UART0), which
 // is independent of the Serial2 link to the hoverboard. View it with:
@@ -121,7 +128,7 @@
 // The ESP32 hosts its own network; the phone connects directly (default URL
 // http://192.168.4.1). AP_PASSWORD "" = OPEN network (no password) for easy
 // access. To secure it, set a password of >= 8 characters (enables WPA2).
-#define AP_SSID "Hovercar BigBoy"
+#define AP_SSID "Hovercar Mini"
 #define AP_PASSWORD "" // "" = open AP; >=8 chars enables WPA2
 #define AP_CHANNEL 1
 #define AP_MAX_CLIENTS 4
@@ -146,9 +153,9 @@
 
 // Bounds the web layer clamps the global Calibration fields to. Pedal raw values
 // are 12-bit ADC counts; the speed thresholds are abs wheel rpm.
-#define ADC_RAW_MAX 4095     // 12-bit ADC full scale (analogReadResolution(12))
-#define DEADBAND_RAW_MAX 500 // sane ceiling for a low-end pedal deadband
-#define SPEED_THRESH_MAX 500 // rpm ceiling for launch / near-stop / blend thresholds
+#define ADC_RAW_MAX 4095      // 12-bit ADC full scale (analogReadResolution(12))
+#define DEADBAND_RAW_MAX 500  // sane ceiling for a low-end pedal deadband
+#define SPEED_THRESH_MAX 500  // rpm ceiling for launch / near-stop / blend thresholds
 #define WHEEL_DIA_MM_MIN 50   // smallest sane drive-wheel diameter (mm)
 #define WHEEL_DIA_MM_MAX 1000 // largest sane drive-wheel diameter (mm)
 

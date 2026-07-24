@@ -4,15 +4,18 @@
 #include "shared_state.h"
 #include "preset_store.h"
 #include <WiFi.h>
+#include <ESPmDNS.h>
 
 // ----------------------------------------------------------------------------
 //  Dashboard page. Static (no server-side templating of user data -> no XSS).
-//  Values are fetched as JSON and rendered client-side.
+//  Values are fetched as JSON and rendered client-side. The one exception is the
+//  AP_SSID build constant, spliced into <title>/<header> via adjacent string-
+//  literal concatenation so the device name lives in exactly one place (config.h).
 // ----------------------------------------------------------------------------
 static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Hovercar BigBoy</title>
+<title>)HTML" AP_SSID R"HTML(</title>
 <style>
   :root { color-scheme: dark; }
   body { font-family: system-ui, sans-serif; margin: 0; background:#111; color:#eee; }
@@ -59,7 +62,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 </style></head>
 <body>
 <header>
-  <span>&#127950; Hovercar BigBoy</span>
+  <span>&#127950; )HTML" AP_SSID R"HTML(</span>
   <div class="nav">
     <button id="navDrive" class="sel" onclick="showPage('drive')">Drive</button>
     <button id="navConfig" onclick="showPage('config')">&#9881; Config</button>
@@ -283,6 +286,14 @@ function fillForm(p){
   updateSpeedCompanions();
 }
 
+// Enable/disable the edit-form controls. Called only on init and when the user
+// picks a different preset - NEVER from the telemetry poll. Re-writing .disabled
+// on a focused input drops the iOS keyboard, so the poll must leave the form
+// alone; a preset's editable flag never changes at runtime anyway.
+function setEditEnabled(ed){
+  for (const k of ['presetName', ...FIELDS, 'limitingEnabled', 'saveBtn']) $(k).disabled = !ed;
+}
+
 // Live telemetry poll (lean payload). Preset / calibration data is fetched
 // separately by refreshConfig() only when it can change, so this hot loop stays
 // tiny. If the config cache is empty (first load, or after a link drop cleared
@@ -315,16 +326,10 @@ async function refresh(){
     if (!s.estop) { hide('engageBtn'); hide('stopStatus'); show('stopBtn'); }
     else          { hide('stopBtn'); show('engageBtn'); s.stopped ? hide('stopStatus') : show('stopStatus'); }
     if (document.activeElement !== $('activeSel')) $('activeSel').value = s.selected;
-    if (!editInit && lastPresets.length){ editInit = true; editIdx = s.selected; $('editSel').value = editIdx; fillForm(lastPresets[editIdx]); }
+    if (!editInit && lastPresets.length){ editInit = true; editIdx = s.selected; $('editSel').value = editIdx; fillForm(lastPresets[editIdx]); setEditEnabled(!!(lastPresets[editIdx]||{}).editable); }
     if (document.activeElement !== $('editSel')) $('editSel').value = editIdx;
     const ep = lastPresets[editIdx] || {};
     const ed = !!ep.editable;
-    // iOS: re-writing .disabled on the focused input (every 200ms poll) blurs it
-    // and drops the keyboard. Only touch it when it changes, never while focused.
-    for (const k of ['presetName', ...FIELDS, 'limitingEnabled', 'saveBtn']){
-      const el = $(k);
-      if (el.disabled !== !ed && document.activeElement !== el) el.disabled = !ed;
-    }
     const isActive = (editIdx === s.selected);
     $('editNote').textContent = ed
       ? (isActive
@@ -337,7 +342,10 @@ async function refresh(){
     $('cfgKmh').textContent = kmhNow.toFixed(1) + ' km/h';
     $('calThrRaw').textContent = s.throttleRaw;
     $('calBrkRaw').textContent = s.brakeRaw;
-    updateSpeedCompanions();
+    // NB: the km/h<->rpm companion readouts are NOT refreshed here. They only
+    // change on user input (oninput) or when a form is (re)filled, and writing
+    // them every poll would mutate inputs inside the edit form - the same iOS
+    // keyboard-drop hazard we avoid for .disabled above.
     tickAutoCal(s);
   }catch(e){ $('link').textContent='NO ESP'; $('link').className='pill bad'; }
 }
@@ -382,6 +390,7 @@ function loadEditPreset(){
   editIdx = parseInt($('editSel').value, 10);
   const p = lastPresets[editIdx];
   if (p) fillForm(p);
+  setEditEnabled(!!(p||{}).editable);
   refresh();
 }
 function limitFields(){
@@ -457,6 +466,12 @@ document.addEventListener('pointerdown', e => {
 });
 const REFRESH_MS = 200;
 (async function poll(){ await refresh(); setTimeout(poll, REFRESH_MS); })();
+// Config-mode heartbeat. Config mode (drive inhibited) is a dead-man on the
+// firmware, so keep it alive only while the Config page is actually open. If the
+// phone disconnects / backgrounds / closes the tab, these stop and the car
+// returns to drive mode on its own instead of staying stuck undrivable.
+const CFG_HEARTBEAT_MS = 1000;
+setInterval(() => { if (currentPage === 'config') postQuiet('/api/configMode', { on: 1 }); }, CFG_HEARTBEAT_MS);
 </script>
 </body></html>)HTML";
 
@@ -490,8 +505,15 @@ void WebInterface::begin()
   // probe hits our server and the OS auto-opens the page.
   _dns.start(53, "*", _apIP);
 
+  // mDNS: reachable as http://hovercar.local in a real browser (the friendly way
+  // to reach the full controls once you've left the captive sheet for Safari).
+  MDNS.begin("hovercar");
+  MDNS.addService("http", "tcp", 80);
+
   _server.on("/", HTTP_GET, [this]()
              { handleRoot(); });
+  _server.on("/portal", HTTP_GET, [this]()
+             { handlePortal(); });
   _server.on("/api/state", HTTP_GET, [this]()
              { handleGetState(); });
   _server.on("/api/config", HTTP_GET, [this]()
@@ -507,11 +529,12 @@ void WebInterface::begin()
   _server.on("/api/estop", HTTP_POST, [this]()
              { handleEstop(); });
   // Any other path (incl. the OS captive-detection probes such as
-  // /hotspot-detect.html, /generate_204, /ncsi.txt) -> redirect to our page,
-  // which triggers the captive-portal sheet to open it.
+  // /hotspot-detect.html, /generate_204, /ncsi.txt) -> redirect to the launcher.
+  // The captive sheet therefore only ever shows /portal (no text field, so it
+  // can't hijack input focus); the full controls at "/" are opened in Safari.
   _server.onNotFound([this]()
                      {
-    _server.sendHeader("Location", String("http://") + _apIP.toString() + "/", true);
+    _server.sendHeader("Location", String("http://") + _apIP.toString() + "/portal", true);
     _server.send(302, "text/plain", ""); });
   _server.begin();
 }
@@ -542,6 +565,39 @@ bool WebInterface::authorized()
 void WebInterface::handleRoot()
 {
   _server.send_P(200, "text/html", INDEX_HTML);
+}
+
+// Launcher shown inside the iOS Captive Network Assistant (CNA). It has NO text
+// input, so the CNA has nothing to force-focus - the bug that made the CNA
+// unusable for editing preset names. The real controls at "/" are meant to be
+// opened in a normal browser; the CNA is too limited (it hijacks input focus).
+// There is no web scheme to open the *default* browser from a captive page, so
+// the one-tap button uses the Safari-only x-safari-* handoff; users on another
+// browser follow the printed address (hovercar.local / the AP IP). Built at
+// runtime so the device name (AP_SSID) and AP IP live in exactly one place.
+void WebInterface::handlePortal()
+{
+  const String ip = _apIP.toString();
+  String p = F("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+               "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+               "<title>");
+  p += AP_SSID;
+  p += F("</title><style>"
+         "body{margin:0;font-family:-apple-system,system-ui,sans-serif;background:#111;color:#eee;"
+         "display:flex;min-height:100vh;align-items:center;justify-content:center;text-align:center;padding:24px}"
+         ".card{max-width:340px}h1{font-size:22px;margin:0 0 8px}p{opacity:.8;line-height:1.5}"
+         ".btn{display:block;margin:20px 0;padding:16px;background:#2563eb;color:#fff;text-decoration:none;"
+         "border-radius:12px;font-size:18px;font-weight:600}code{background:#222;padding:2px 6px;border-radius:6px}"
+         "</style></head><body><div class=\"card\"><h1>&#127950; ");
+  p += AP_SSID;
+  p += F("</h1><p>This window can&rsquo;t run the controls &mdash; open them in your browser:</p>"
+         "<a class=\"btn\" href=\"x-safari-http://");
+  p += ip;
+  p += F("/\">Open in Safari</a>"
+         "<p>Using another browser? Open it and go to<br><code>hovercar.local</code> or <code>");
+  p += ip;
+  p += F("</code></p></div></body></html>");
+  _server.send(200, "text/html", p);
 }
 
 // Format one preset (name + full tunables) as a JSON object. Names are

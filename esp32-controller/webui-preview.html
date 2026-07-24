@@ -898,6 +898,15 @@
         updateSpeedCompanions();
       }
 
+      // Enable/disable the edit-form controls. Called only on init and when the
+      // user picks a different preset — NEVER from the telemetry poll. Re-writing
+      // .disabled on a focused input drops the iOS keyboard, so the poll must
+      // leave the form alone; a preset's editable flag never changes at runtime.
+      function setEditEnabled(ed) {
+        for (const k of ["presetName", ...FIELDS, "limitingEnabled", "saveBtn"])
+          $(k).disabled = !ed;
+      }
+
       async function refresh() {
         try {
           const r = await fetch("/api/state");
@@ -958,24 +967,12 @@
             editIdx = s.selected;
             $("editSel").value = editIdx;
             fillForm(s.presets[editIdx]);
+            setEditEnabled(!!(s.presets[editIdx] || {}).editable);
           }
           if (document.activeElement !== $("editSel"))
             $("editSel").value = editIdx;
           const ep = s.presets[editIdx] || {};
           const ed = !!ep.editable;
-          // iOS: re-writing .disabled on the focused input (every 200ms poll)
-          // blurs it and drops the keyboard. Only touch it when it changes,
-          // never while focused.
-          for (const k of [
-            "presetName",
-            ...FIELDS,
-            "limitingEnabled",
-            "saveBtn",
-          ]) {
-            const el = $(k);
-            if (el.disabled !== !ed && document.activeElement !== el)
-              el.disabled = !ed;
-          }
           const isActive = editIdx === s.selected;
           $("editNote").textContent = ed
             ? isActive
@@ -996,9 +993,12 @@
           if (!calInit && s.calib) {
             calInit = true;
             for (const k of CAL_FIELDS) if ($(k)) $(k).value = s.calib[k];
+            updateSpeedCompanions();
           }
-          // Keep companion readouts in sync (also covers a wheel-size change).
-          updateSpeedCompanions();
+          // NB: companion km/h<->rpm readouts are NOT refreshed every poll — that
+          // would mutate inputs inside the edit form (iOS keyboard-drop hazard).
+          // Every source field (incl. wheelDiaMm) calls updateSpeedCompanions()
+          // on its own oninput, so they stay in sync without the poll.
           // Drive the auto-calibrate capture off the live raw readings.
           tickAutoCal(s);
         } catch (e) {
@@ -1050,6 +1050,7 @@
         editIdx = parseInt($("editSel").value, 10);
         const p = lastPresets[editIdx];
         if (p) fillForm(p);
+        setEditEnabled(!!(p || {}).editable);
         refresh();
       }
       function limitFields() {
@@ -1182,6 +1183,14 @@
         await refresh();
         setTimeout(poll, REFRESH_MS);
       })();
+      // Config-mode heartbeat. Config mode (drive inhibited) is a dead-man on the
+      // firmware, so keep it alive only while the Config page is actually open. If
+      // the phone disconnects / backgrounds / closes the tab, these stop and the
+      // car returns to drive mode on its own instead of staying stuck undrivable.
+      const CFG_HEARTBEAT_MS = 1000;
+      setInterval(() => {
+        if (currentPage === "config") postQuiet("/api/configMode", { on: 1 });
+      }, CFG_HEARTBEAT_MS);
     </script>
   </body>
 </html>
