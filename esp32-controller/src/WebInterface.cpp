@@ -324,7 +324,12 @@ async function refresh(){
     if (document.activeElement !== $('editSel')) $('editSel').value = editIdx;
     const ep = s.presets[editIdx] || {};
     const ed = !!ep.editable;
-    for (const k of ['presetName', ...FIELDS, 'limitingEnabled', 'saveBtn']) $(k).disabled = !ed;
+    // iOS: re-writing .disabled on the focused input (every 200ms poll) blurs it
+    // and drops the keyboard. Only touch it when it changes, never while focused.
+    for (const k of ['presetName', ...FIELDS, 'limitingEnabled', 'saveBtn']){
+      const el = $(k);
+      if (el.disabled !== !ed && document.activeElement !== el) el.disabled = !ed;
+    }
     const isActive = (editIdx === s.selected);
     $('editNote').textContent = ed
       ? (isActive
