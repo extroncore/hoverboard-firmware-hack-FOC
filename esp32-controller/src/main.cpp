@@ -23,8 +23,36 @@ SharedState   g_state;
 WebInterface  g_web;
 HoverboardLink g_link;
 
+// Median of the sample ring. Copies into a scratch buffer and insertion-sorts it
+// (the count is tiny) so the caller's ring keeps its insertion order. A median
+// throws impulse spikes out entirely (an average would still be dragged by them).
+static int medianOf(const int *ring) {
+  int s[PEDAL_MEDIAN_SAMPLES];
+  for (int i = 0; i < PEDAL_MEDIAN_SAMPLES; i++) s[i] = ring[i];
+  for (int i = 1; i < PEDAL_MEDIAN_SAMPLES; i++)
+    for (int j = i; j > 0 && s[j] < s[j - 1]; j--) {
+      int tmp = s[j]; s[j] = s[j - 1]; s[j - 1] = tmp;
+    }
+  return s[PEDAL_MEDIAN_SAMPLES / 2];
+}
+
+// Take the median over the sample ring, then fold it into a persistent EMA
+// (alpha = 1/2^shift) to smooth what the median leaves behind. `ema` is
+// caller-owned state and must be seeded (see medianOf) before the first call.
+static int filterPedal(const int *ring, int &ema, uint8_t shift) {
+  int m = medianOf(ring);
+  ema += (m - ema) >> shift;
+  return ema;
+}
+
 static void controlTask(void *) {
-  const TickType_t period = pdMS_TO_TICKS(CONTROL_PERIOD_MS);
+  // The task ticks at the (fast) sample cadence and only builds a command every
+  // SAMPLES_PER_CONTROL ticks, so pedal reads are spread across the command
+  // period instead of taken back-to-back (see filterPedal / config.h).
+  static_assert(CONTROL_PERIOD_MS % PEDAL_SAMPLE_PERIOD_MS == 0,
+                "CONTROL_PERIOD_MS must be a whole multiple of PEDAL_SAMPLE_PERIOD_MS");
+  constexpr int SAMPLES_PER_CONTROL = CONTROL_PERIOD_MS / PEDAL_SAMPLE_PERIOD_MS;
+  const TickType_t samplePeriod = pdMS_TO_TICKS(PEDAL_SAMPLE_PERIOD_MS);
   TickType_t lastWake = xTaskGetTickCount();
 
   pinMode(DIR_SWITCH_PIN, INPUT_PULLUP);
@@ -33,7 +61,35 @@ static void controlTask(void *) {
   int16_t torqueOut    = 0;            // ramped, signed torque being commanded
   int8_t  activeCmdDir = FORWARD_SIGN; // command sign the throttle drives now
 
+  // Pedal sample rings: one raw read per pedal pushed every fast tick. Pre-fill
+  // them so the first median (and the EMAs seeded from it) start settled instead
+  // of ramping up from zero over the opening ticks.
+  int     thrRing[PEDAL_MEDIAN_SAMPLES];
+  int     brkRing[PEDAL_MEDIAN_SAMPLES];
+  for (int i = 0; i < PEDAL_MEDIAN_SAMPLES; i++) {
+    thrRing[i] = analogRead(THROTTLE_PIN);
+    brkRing[i] = analogRead(BRAKE_PIN);
+  }
+  uint8_t ringPos     = 0;
+  uint8_t sampleCount = 0;             // fast ticks since the last command
+  int     thrEma      = medianOf(thrRing);
+  int     brkEma      = medianOf(brkRing);
+
   for (;;) {
+    // Sample both pedals every fast tick, spreading the reads across the command
+    // period so a short noise burst can't swamp them all.
+    thrRing[ringPos] = analogRead(THROTTLE_PIN);
+    brkRing[ringPos] = analogRead(BRAKE_PIN);
+    ringPos = (uint8_t)((ringPos + 1) % PEDAL_MEDIAN_SAMPLES);
+
+    // Only build & send a command once per CONTROL_PERIOD_MS; keep sampling in
+    // between so the ring stays full and time-spread.
+    if (++sampleCount < SAMPLES_PER_CONTROL) {
+      vTaskDelayUntil(&lastWake, samplePeriod);
+      continue;
+    }
+    sampleCount = 0;
+
     // 1) Drain feedback and evaluate the host-side link watchdog.
     g_link.poll();
     bool linkOk = (millis() - g_link.lastRxMs()) < LINK_TIMEOUT_MS;
@@ -51,8 +107,8 @@ static void controlTask(void *) {
     int16_t speedAbs    = (int16_t)abs(motionSpeed);
     int     motionDir   = (motionSpeed > 0) - (motionSpeed < 0);   // -1 / 0 / +1
 
-    int  throttleRaw   = analogRead(THROTTLE_PIN);
-    int  brakeRaw      = analogRead(BRAKE_PIN);
+    int  throttleRaw   = filterPedal(thrRing, thrEma, THROTTLE_EMA_SHIFT);
+    int  brakeRaw      = filterPedal(brkRing, brkEma, BRAKE_EMA_SHIFT);
     bool switchForward = (digitalRead(DIR_SWITCH_PIN) == HIGH);     // NO/open = forward
 
     int16_t throttleTq = mapPedal(throttleRaw, c.throttleRawMin, c.throttleRawMax,
@@ -179,7 +235,7 @@ static void controlTask(void *) {
     tm.stopped       = (speedAbs <= c.nearStopThresh);
     g_state.setTelemetry(tm);
 
-    vTaskDelayUntil(&lastWake, period);
+    vTaskDelayUntil(&lastWake, samplePeriod);
   }
 }
 

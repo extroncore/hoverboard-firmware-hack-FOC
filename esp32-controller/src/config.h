@@ -39,6 +39,26 @@
 #define BRAKE_RAW_MIN 900
 #define BRAKE_RAW_MAX 2090
 #define BRAKE_DEADBAND_RAW 60
+
+// Spike/noise filtering. The ESP32 ADC is noisy (WiFi is live), so each pedal is
+// sampled once per PEDAL_SAMPLE_PERIOD_MS into a ring holding the last
+// PEDAL_MEDIAN_SAMPLES reads. Just before a command goes out, the median of the
+// ring is taken: a median discards impulse spikes outright (unlike an average,
+// which they drag). Crucially the samples are SPREAD across the whole command
+// period rather than taken back-to-back, so a short noise burst (e.g. a WiFi TX)
+// corrupts at most one or two of them and the median still rejects it;
+// back-to-back reads would all fall inside a burst and pass it straight through.
+// The median then folds into a per-pedal EMA (alpha = 1/2^shift) to smooth the
+// residual jitter. Brake uses the lighter (faster-settling) EMA so it stays
+// responsive; throttle is smoothed harder for feel. The spread median lags a
+// genuine transition by ~half the window (a few ms), which is negligible for a
+// pedal. Pair this with a 0.1uF cap from each ADC pin to GND (Espressif's own
+// recommendation). CONTROL_PERIOD_MS must be a whole multiple of the sample
+// period (checked with a static_assert in main.cpp).
+#define PEDAL_SAMPLE_PERIOD_MS 4 // spread ADC reads across the command period
+#define PEDAL_MEDIAN_SAMPLES 5   // ring size the median is taken over
+#define THROTTLE_EMA_SHIFT 2     // alpha = 1/4, smoother
+#define BRAKE_EMA_SHIFT 1        // alpha = 1/2, more responsive
 // Absolute brake ceiling. Per-profile brakeTorqueMax (Tunables) is the live knob;
 // this only bounds it (and is the authority used for the emergency stop, which
 // intentionally brakes at full strength). Lower per-profile values give a gentler
