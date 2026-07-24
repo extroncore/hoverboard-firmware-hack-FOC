@@ -21,7 +21,8 @@ private:
   IPAddress _apIP;
 
   void handleRoot();
-  void handleGetState();
+  void handleGetState();            // lean live telemetry (polled at REFRESH_MS)
+  void handleGetConfig();           // presets + calibration (fetched on load / after saves)
   void handleSelect();             // choose the active (running) preset
   void handleSavePreset();         // persist edits into a user slot (+ apply live if it's active)
   void handleSaveCalibration();    // persist global pedal/motion calibration (+ apply live)

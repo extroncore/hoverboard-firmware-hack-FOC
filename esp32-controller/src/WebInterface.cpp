@@ -154,7 +154,7 @@ static const char INDEX_HTML[] PROGMEM = R"HTML(<!DOCTYPE html>
 
     <fieldset><legend>Wheel &amp; live readings</legend>
       <label>Wheel diameter (mm)</label>
-      <input id="wheelDiaMm" type="number" inputmode="numeric" min="50" max="1000" enterkeyhint="next" oninput="refresh()">
+      <input id="wheelDiaMm" type="number" inputmode="numeric" min="50" max="1000" enterkeyhint="next" oninput="updateSpeedCompanions()">
       <div class="hint">Sets the rpm to km/h conversion for the whole app. 6.5" hub ~165 mm,
         8.5" ~216 mm, 10" ~254 mm.</div>
       <div class="grid" style="margin:12px 0">
@@ -238,11 +238,9 @@ const CAL_FIELDS = ['throttleRawMin','throttleRawMax','throttleDeadband','brakeR
                     'launchSpeedThresh','nearStopThresh','brakeBlendSpeed'];
 // Config thresholds: rpm is the real input, with a disabled km/h readout (id + "_kmh").
 const SPEED_RPM_INPUTS = ['launchSpeedThresh','nearStopThresh','brakeBlendSpeed'];
-let presetSig = '';
 let lastPresets = [];
 let editIdx = 0;
 let editInit = false;
-let calInit = false;
 let currentPage = 'drive';
 let autoCal = null;
 let lastCalib = {};
@@ -259,10 +257,11 @@ function updateSpeedCompanions(){
 }
 // Calibration counts as present only if the flag is set AND the stored data is
 // actually valid (pressed > released for both pedals) - belt & braces.
-function calibValid(s){
-  return !!(s && s.calibrated && s.calib &&
-    s.calib.throttleRawMax > s.calib.throttleRawMin &&
-    s.calib.brakeRawMax > s.calib.brakeRawMin);
+function calibValid(calibrated){
+  const c = lastCalib;
+  return !!(calibrated && c &&
+    c.throttleRawMax > c.throttleRawMin &&
+    c.brakeRawMax > c.brakeRawMin);
 }
 
 // Page navigation. Entering Config puts the firmware in config mode (drive
@@ -284,14 +283,17 @@ function fillForm(p){
   updateSpeedCompanions();
 }
 
+// Live telemetry poll (lean payload). Preset / calibration data is fetched
+// separately by refreshConfig() only when it can change, so this hot loop stays
+// tiny. If the config cache is empty (first load, or after a link drop cleared
+// nothing but we never got it) we lazily (re)fetch it first - self-healing.
 async function refresh(){
   try{
+    if (!lastPresets.length) await refreshConfig();
     const r = await fetch('/api/state'); const s = await r.json();
-    lastPresets = s.presets;
-    lastCalib = s.calib || {};
     // Calibration gate: until valid calibration exists, keep the user on Config
     // and disable the Drive page entirely.
-    const calOk = calibValid(s);
+    const calOk = calibValid(s.calibrated);
     $('navDrive').disabled = !calOk;
     $('firstRun').style.display = calOk ? 'none' : '';
     if (!calOk && currentPage !== 'config') showPage('config');
@@ -312,17 +314,10 @@ async function refresh(){
     $('throttle').textContent = s.throttlePct + ' %';
     if (!s.estop) { hide('engageBtn'); hide('stopStatus'); show('stopBtn'); }
     else          { hide('stopBtn'); show('engageBtn'); s.stopped ? hide('stopStatus') : show('stopStatus'); }
-    const sig = s.presets.map(p=>p.i+':'+p.name).join('|');
-    if (sig !== presetSig){
-      presetSig = sig;
-      const opts = s.presets.map(p=>`<option value="${p.i}">${p.name}${p.editable?'':' (locked)'}</option>`).join('');
-      $('activeSel').innerHTML = opts;
-      $('editSel').innerHTML = opts;
-    }
     if (document.activeElement !== $('activeSel')) $('activeSel').value = s.selected;
-    if (!editInit){ editInit = true; editIdx = s.selected; $('editSel').value = editIdx; fillForm(s.presets[editIdx]); }
+    if (!editInit && lastPresets.length){ editInit = true; editIdx = s.selected; $('editSel').value = editIdx; fillForm(lastPresets[editIdx]); }
     if (document.activeElement !== $('editSel')) $('editSel').value = editIdx;
-    const ep = s.presets[editIdx] || {};
+    const ep = lastPresets[editIdx] || {};
     const ed = !!ep.editable;
     // iOS: re-writing .disabled on the focused input (every 200ms poll) blurs it
     // and drops the keyboard. Only touch it when it changes, never while focused.
@@ -336,25 +331,43 @@ async function refresh(){
           ? 'Editing "'+ep.name+'" - the ACTIVE profile. Save writes it to flash and applies it to the car now.'
           : 'Editing "'+ep.name+'". Save writes it to flash; switch it to Active above to drive with it.')
       : 'Built-in preset - read-only. Pick preset 3-5 to customise & save.';
-    // Config page live readings
+    // Config page live readings (throttleRaw/brakeRaw are the LIVE ADC values -
+    // they belong to the fast poll so calibration can watch them move).
     $('cfgRpm').textContent = s.speedL + ' / ' + s.speedR;
     $('cfgKmh').textContent = kmhNow.toFixed(1) + ' km/h';
     $('calThrRaw').textContent = s.throttleRaw;
     $('calBrkRaw').textContent = s.brakeRaw;
-    if (!calInit && s.calib){ calInit = true; for (const k of CAL_FIELDS) if ($(k)) $(k).value = s.calib[k]; }
     updateSpeedCompanions();
     tickAutoCal(s);
   }catch(e){ $('link').textContent='NO ESP'; $('link').className='pill bad'; }
 }
+
+// Fetch presets + stored calibration (the heavy, rarely-changing data). Called
+// on load and after any save; rebuilds the profile dropdowns and fills the
+// calibration form with the stored (clamped) values.
+async function refreshConfig(){
+  const r = await fetch('/api/config'); const c = await r.json();
+  lastPresets = c.presets || [];
+  lastCalib = c.calib || {};
+  const opts = lastPresets.map(p=>`<option value="${p.i}">${p.name}${p.editable?'':' (locked)'}</option>`).join('');
+  $('activeSel').innerHTML = opts;
+  $('editSel').innerHTML = opts;
+  $('editSel').value = editIdx;
+  for (const k of CAL_FIELDS) if ($(k)) $(k).value = lastCalib[k];
+  updateSpeedCompanions();
+}
 function show(id){ $(id).style.display=''; }
 function hide(id){ $(id).style.display='none'; }
-async function post(url, extra){
+// reloadCfg: after a successful save, refetch /api/config so the cached presets /
+// calibration (and the dropdowns + calib form) reflect the stored, clamped values.
+async function post(url, extra, reloadCfg){
   const p = new URLSearchParams();
   for (const k in extra) p.set(k, extra[k]);
   const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'}, body:p});
   const t = await r.text();
   $('msg').textContent = (r.ok ? 'OK ' : 'X ') + t;
   $('msg').style.color = r.ok ? '#7CFFA0' : '#ff8080';
+  if (reloadCfg && r.ok){ try { await refreshConfig(); } catch(e){} }
   refresh();
 }
 async function postQuiet(url, extra){
@@ -377,13 +390,13 @@ function limitFields(){
   o.limitingEnabled = $('limitingEnabled').value;
   return o;
 }
-function savePreset(){ post('/api/savePreset', Object.assign({index:editIdx, name:$('presetName').value}, limitFields())); }
+function savePreset(){ post('/api/savePreset', Object.assign({index:editIdx, name:$('presetName').value}, limitFields()), true); }
 // Save global config. Every field is sent as-is (rpm / raw counts / mm); the
 // firmware clamps and stores in rpm - no km/h ever crosses the wire.
 function saveConfig(){
   const o = {};
   for (const k of CAL_FIELDS) o[k] = $(k).value;
-  post('/api/saveCalibration', o);
+  post('/api/saveCalibration', o, true);
 }
 
 // Auto-calibrate: two-phase guided capture driven by the poll loop. Phase 'press'
@@ -481,6 +494,8 @@ void WebInterface::begin()
              { handleRoot(); });
   _server.on("/api/state", HTTP_GET, [this]()
              { handleGetState(); });
+  _server.on("/api/config", HTTP_GET, [this]()
+             { handleGetConfig(); });
   _server.on("/api/select", HTTP_POST, [this]()
              { handleSelect(); });
   _server.on("/api/savePreset", HTTP_POST, [this]()
@@ -546,11 +561,38 @@ static int fmtPreset(char *out, size_t n, int i, const Tunables &t, bool editabl
                   t.limitingEnabled ? "true" : "false");
 }
 
+// Lean live-telemetry payload polled at REFRESH_MS. Only values that change on
+// their own (or on select/estop/configMode) live here; the heavy, rarely-changing
+// preset + calibration data is served separately by handleGetConfig(). This keeps
+// the hot poll ~350 B instead of ~2 KB, cutting per-tick CPU and bandwidth.
 void WebInterface::handleGetState()
 {
-  Tunables t = g_state.getTunables(); // live / active profile
+  Tunables t = g_state.getTunables(); // live / active profile (for its name)
   Telemetry tm = g_state.getTelemetry();
 
+  static char buf[512];
+  snprintf(buf, sizeof(buf),
+           "{\"activeName\":\"%s\",\"selected\":%d,"
+           "\"calibrated\":%s,\"configMode\":%s,"
+           "\"linkOk\":%s,\"batVoltage_cV\":%d,\"boardTemp\":%d,"
+           "\"speedL\":%d,\"speedR\":%d,\"torqueSent\":%d,\"braking\":%s,"
+           "\"activeForward\":%s,\"reqForward\":%s,\"throttlePct\":%d,\"brakePct\":%d,"
+           "\"throttleRaw\":%d,\"brakeRaw\":%d,"
+           "\"estop\":%s,\"stopped\":%s}",
+           t.profileName, g_presets.selected(),
+           g_presets.calibrated() ? "true" : "false", g_state.getConfigMode() ? "true" : "false",
+           tm.linkOk ? "true" : "false", tm.batVoltage_cV, tm.boardTemp,
+           tm.speedL, tm.speedR, tm.torqueSent, tm.braking ? "true" : "false",
+           tm.activeForward ? "true" : "false", tm.reqForward ? "true" : "false",
+           tm.throttlePct, tm.brakePct, tm.throttleRaw, tm.brakeRaw,
+           g_state.getEstop() ? "true" : "false", tm.stopped ? "true" : "false");
+  _server.send(200, "application/json", buf);
+}
+
+// Presets + global calibration. Fetched by the client on load and again after any
+// save (values change) — never on the poll loop.
+void WebInterface::handleGetConfig()
+{
   // All presets with their full tunables, so the editor can load any of them
   // (not just the active one) without an extra round-trip. static: this handler
   // only runs in the single-threaded loop() context, and it keeps these ~1.5 KB
@@ -567,8 +609,7 @@ void WebInterface::handleGetState()
   snprintf(plist + pn, sizeof(plist) - pn, "]");
 
   // Global calibration (pedal mapping + motion thresholds). Nested object so the
-  // editor can bind directly to it. throttleRaw/brakeRaw are the LIVE raw ADC
-  // readings, exposed here so the user can calibrate by watching them move.
+  // editor can bind directly to it.
   const Calibration &c = g_presets.calibration();
   char calib[360];
   snprintf(calib, sizeof(calib),
@@ -581,22 +622,8 @@ void WebInterface::handleGetState()
            c.launchSpeedThresh, c.nearStopThresh, c.brakeBlendSpeed,
            c.dirChangeBrakeTorque, c.wheelDiaMm);
 
-  static char buf[2200];
-  snprintf(buf, sizeof(buf),
-           "{\"activeName\":\"%s\",\"selected\":%d,\"presets\":%s,\"calib\":%s,"
-           "\"calibrated\":%s,\"configMode\":%s,"
-           "\"linkOk\":%s,\"batVoltage_cV\":%d,\"boardTemp\":%d,"
-           "\"speedL\":%d,\"speedR\":%d,\"torqueSent\":%d,\"braking\":%s,"
-           "\"activeForward\":%s,\"reqForward\":%s,\"throttlePct\":%d,\"brakePct\":%d,"
-           "\"throttleRaw\":%d,\"brakeRaw\":%d,"
-           "\"estop\":%s,\"stopped\":%s}",
-           t.profileName, g_presets.selected(), plist, calib,
-           g_presets.calibrated() ? "true" : "false", g_state.getConfigMode() ? "true" : "false",
-           tm.linkOk ? "true" : "false", tm.batVoltage_cV, tm.boardTemp,
-           tm.speedL, tm.speedR, tm.torqueSent, tm.braking ? "true" : "false",
-           tm.activeForward ? "true" : "false", tm.reqForward ? "true" : "false",
-           tm.throttlePct, tm.brakePct, tm.throttleRaw, tm.brakeRaw,
-           g_state.getEstop() ? "true" : "false", tm.stopped ? "true" : "false");
+  static char buf[1900];
+  snprintf(buf, sizeof(buf), "{\"presets\":%s,\"calib\":%s}", plist, calib);
   _server.send(200, "application/json", buf);
 }
 
