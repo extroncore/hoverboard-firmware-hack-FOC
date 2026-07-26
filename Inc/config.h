@@ -76,16 +76,16 @@
 #define BAT_CALIB_REAL_VOLTAGE  3970      // input voltage measured by multimeter (multiplied by 100). In this case 43.00 V * 100 = 4300
 #define BAT_CALIB_ADC           1492      // adc-value measured by mainboard (value nr 5 on UART debug output)
 #define BAT_CELLS               10        // battery number of cells. Normal Hoverboard battery: 10s
-#define BAT_LVL2_ENABLE         0         // to beep or not to beep, 1 or 0
+#define BAT_LVL2_ENABLE         1         // to beep or not to beep, 1 or 0
 #define BAT_LVL1_ENABLE         1         // to beep or not to beep, 1 or 0
 #define BAT_DEAD_ENABLE         1         // to poweroff or not to poweroff, 1 or 0
 #define BAT_BLINK_INTERVAL      80        // battery led blink interval (80 loops * 5ms ~= 400ms)
-#define BAT_LVL5                (390 * BAT_CELLS * BAT_CALIB_ADC) / BAT_CALIB_REAL_VOLTAGE    // Green blink:  no beep
+#define BAT_LVL5                (400 * BAT_CELLS * BAT_CALIB_ADC) / BAT_CALIB_REAL_VOLTAGE    // Green blink:  no beep
 #define BAT_LVL4                (380 * BAT_CELLS * BAT_CALIB_ADC) / BAT_CALIB_REAL_VOLTAGE    // Yellow:       no beep
-#define BAT_LVL3                (370 * BAT_CELLS * BAT_CALIB_ADC) / BAT_CALIB_REAL_VOLTAGE    // Yellow blink: no beep 
-#define BAT_LVL2                (360 * BAT_CELLS * BAT_CALIB_ADC) / BAT_CALIB_REAL_VOLTAGE    // Red:          gently beep at this voltage level. [V*100/cell]. In this case 3.60 V/cell
-#define BAT_LVL1                (350 * BAT_CELLS * BAT_CALIB_ADC) / BAT_CALIB_REAL_VOLTAGE    // Red blink:    fast beep. Your battery is almost empty. Charge now! [V*100/cell]. In this case 3.50 V/cell
-#define BAT_DEAD                (337 * BAT_CELLS * BAT_CALIB_ADC) / BAT_CALIB_REAL_VOLTAGE    // All leds off: undervoltage poweroff. (while not driving) [V*100/cell]. In this case 3.37 V/cell
+#define BAT_LVL3                (350 * BAT_CELLS * BAT_CALIB_ADC) / BAT_CALIB_REAL_VOLTAGE    // Yellow blink: no beep 
+#define BAT_LVL2                (340 * BAT_CELLS * BAT_CALIB_ADC) / BAT_CALIB_REAL_VOLTAGE    // Red:          gently beep at this voltage level. [V*100/cell]. In this case 3.40 V/cell
+#define BAT_LVL1                (320 * BAT_CELLS * BAT_CALIB_ADC) / BAT_CALIB_REAL_VOLTAGE    // Red blink:    fast beep. Your battery is almost empty. Charge now! [V*100/cell]. In this case 3.20 V/cell
+#define BAT_DEAD                (300 * BAT_CELLS * BAT_CALIB_ADC) / BAT_CALIB_REAL_VOLTAGE    // All leds off: undervoltage poweroff. (while not driving) [V*100/cell]. In this case 3.00 V/cell
 // ######################## END OF BATTERY ###############################
 
 
@@ -183,6 +183,11 @@
 // Default settings will be applied at the end of this config file if not set before
 #define INACTIVITY_TIMEOUT        8       // Minutes of not driving until poweroff. it is not very precise.
 #define BEEPS_BACKWARD            1       // 0 or 1
+// Reverse warning beep is latched with hysteresis on measured speed, so it beeps
+// continuously while actually rolling backwards (speedAvg < 0) instead of flickering
+// near standstill. ON: start below -REVERSE_BEEP_ON_RPM; OFF: stop above -REVERSE_BEEP_OFF_RPM.
+#define REVERSE_BEEP_ON_RPM       30      // [rpm] start reverse beep once moving back this fast (~0.93 km/h @6.5")
+#define REVERSE_BEEP_OFF_RPM      8       // [rpm] stop near standstill (~0.25 km/h; must be < ON for hysteresis)
 #define ADC_MARGIN                100     // ADC input margin applied on the raw ADC min and max to make sure the MIN and MAX values are reached even in the presence of noise
 #define ADC_PROTECT_TIMEOUT       100     // ADC Protection: number of wrong / missing input commands before safety state is taken
 #define ADC_PROTECT_THRESH        200     // ADC Protection threshold below/above the MIN/MAX ADC values
@@ -344,9 +349,15 @@
     #define FLASH_WRITE_KEY      0x1002  // Flash memory writing key. Change this key to ignore the input calibrations from the flash memory and use the ones in config.h
   #endif
 
-  // #define TANK_STEERING              // use for tank steering, each input controls each wheel 
+  // #define TANK_STEERING              // use for tank steering, each input controls each wheel
   // #define SUPPORT_BUTTONS_LEFT       // use left sensor board cable for button inputs.  Disable DEBUG_SERIAL_USART2!
   // #define SUPPORT_BUTTONS_RIGHT      // use right sensor board cable for button inputs. Disable DEBUG_SERIAL_USART3!
+
+  // ESP32 host control: run FOC in TORQUE mode. The `speed` field of SerialCommand is a torque
+  // (current) request. All dynamic limiting is done by the ESP32; the config.h current/speed
+  // caps act only as hard hardware-safety ceilings. Scoped here so other variants keep VLT_MODE.
+  #undef  CTRL_MOD_REQ
+  #define CTRL_MOD_REQ  TRQ_MODE       // TRQ_MODE = 3; TORQUE is only available for FOC_CTRL
 #endif
 // ######################## END OF VARIANT_USART SETTINGS #########################
 

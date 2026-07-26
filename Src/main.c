@@ -265,6 +265,18 @@ int main(void) {
     readCommand();                        // Read Command: input1[inIdx].cmd, input2[inIdx].cmd
     calcAvgSpeed();                       // Calculate average measured speed: speedAvg, speedAvgAbs
 
+    #if defined(CONTROL_SERIAL_USART2) || defined(CONTROL_SERIAL_USART3)
+      // ####### SERIAL DEAD-MAN #######
+      // If no valid command arrived within SERIAL_TIMEOUT (~0.8 s), zero the torque request so the
+      // rate limiter smoothly ramps the motors down instead of holding the last command forever.
+      // This is the fail-safe for a crashed/disconnected host (e.g. the ESP32); the host also runs
+      // its own watchdog (defense in depth).
+      if (timeoutFlgSerial) {
+        input1[inIdx].cmd = 0;            // Zero steering
+        input2[inIdx].cmd = 0;            // Zero torque/speed request
+      }
+    #endif
+
     #ifndef VARIANT_TRANSPOTTER
       // ####### MOTOR ENABLING: Only if the initial input is very small (for SAFETY) #######
       if (enable == 0 && !rtY_Left.z_errCode && !rtY_Right.z_errCode && 
@@ -562,6 +574,12 @@ int main(void) {
     // ####### POWEROFF BY POWER-BUTTON #######
     poweroffPressCheck();
 
+    // ####### REVERSE-BEEP LATCH (hysteresis) #######
+    // Beep continuously while rolling backwards; hysteresis avoids flicker near 0.
+    static uint8_t reverseBeepLatch = 0;
+    if      (speedAvg < -REVERSE_BEEP_ON_RPM)  reverseBeepLatch = 1;
+    else if (speedAvg > -REVERSE_BEEP_OFF_RPM) reverseBeepLatch = 0;
+
     // ####### BEEP AND EMERGENCY POWEROFF #######
     if (TEMP_POWEROFF_ENABLE && board_temp_deg_c >= TEMP_POWEROFF && speedAvgAbs < 20){  // poweroff before mainboard burns OR low bat 3
       #if defined(DEBUG_SERIAL_USART2) || defined(DEBUG_SERIAL_USART3)
@@ -588,7 +606,7 @@ int main(void) {
       beepCount(0, 10, 6);
     } else if (BAT_LVL2_ENABLE && batVoltage < BAT_LVL2) {                                            // 1 beep slow (medium pitch): Low bat 2
       beepCount(0, 10, 30);
-    } else if (BEEPS_BACKWARD && (((cmdR < -50 || cmdL < -50) && speedAvg < 0) || MultipleTapBrake.b_multipleTap)) { // 1 beep fast (high pitch): Backward spinning motors
+    } else if (BEEPS_BACKWARD && (reverseBeepLatch || MultipleTapBrake.b_multipleTap)) { // 1 beep fast (high pitch): Backward spinning motors
       beepCount(0, 5, 1);
       backwardDrive = 1;
     } else {  // do not beep
